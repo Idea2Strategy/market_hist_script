@@ -1,0 +1,27 @@
+# === 자격 증명 및 환경 변수 제외 (보안 필수) ===
+.env
+.env.local
+.env.development
+.env.production
+
+# === 대용량 주가 데이터 제외 ===
+market_data/
+*.parquet
+*.csv
+*.txt
+
+# === Python 가상환경 및 캐시 파일 제외 ===
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.conda/
+.venv/
+venv/
+
+# === 시스템 및 에디터 파일 제외 ===
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

@@ -41,12 +41,12 @@ Wikipedia S&P 500 목록/변경 이력
 | `script.py` | 전체 티커 수집, Alpaca 5분봉 최초 수집 및 증분 갱신 |
 | `get_ticker.py` | Alpaca 호출 없이 최근 3년의 S&P 500 티커 목록만 확인 |
 | `check_data.py` | 로컬 Parquet 전체 검사 후 요약과 앞 20개 종목을 터미널에 출력 |
-| `data_report.py` | 전 종목 검사 결과와 백테스트 가이드를 `data_audit_report.txt`로 생성 |
+| `data_report.py` | 전 종목 검사 결과와 백테스트 가이드를 `report/data_audit_report.txt`로 생성 |
 | `.env.example` | Alpaca 인증정보 형식 예시 |
 | `requirements.txt` | 머신별 가상환경 경로 없이 정리한 프로젝트 런타임 의존성 |
 | `market_data/` | 생성된 종목별 Parquet 데이터. Git 추적 제외 |
-| `sp500_tickers_3years.txt` | 마지막 실행에서 만든 수집 대상 티커 목록. Git 추적 제외 |
-| `data_audit_report.txt` | `data_report.py`가 생성하는 상세 검사 보고서. Git 추적 제외 |
+| `ticker_info/sp500_tickers_3years.txt` | 마지막 실행에서 만든 수집 대상 티커 목록. Git 추적 제외 |
+| `report/data_audit_report.txt` | `data_report.py`가 생성하는 상세 검사 보고서. Git 추적 제외 |
 
 ## 사전 준비
 
@@ -93,6 +93,7 @@ python -m pip install -r requirements.txt
 - `pandas`: 티커 테이블 파싱 및 시계열 처리
 - `pyarrow`: Parquet 읽기와 쓰기
 - `lxml`: `pandas.read_html()`의 Wikipedia 표 파싱
+- `python-dotenv`: 프로젝트 루트의 `.env` 파일에서 Alpaca 인증정보 로드
 
 ### 3. Alpaca 인증정보 설정하기
 
@@ -112,7 +113,7 @@ export ALPACA_API_KEY="발급받은_API_KEY"
 export ALPACA_SECRET_KEY="발급받은_SECRET_KEY"
 ```
 
-> `.env.example`을 복사해 `.env`를 만들 수는 있지만, 현재 `script.py`는 `.env` 파일을 자동으로 읽지 않습니다. 따라서 위처럼 환경변수를 셸에 직접 설정하거나, 실행 환경에서 `.env` 로딩을 별도로 구성해야 합니다. 실제 API 키가 들어 있는 `.env` 파일은 커밋하지 마세요.
+`script.py`는 프로젝트 루트의 `.env` 파일을 자동으로 읽습니다. `.env.example`을 `.env`로 복사한 뒤 실제 API 키를 입력해도 되고, 위처럼 현재 셸의 환경변수로 설정해도 됩니다. 셸 환경변수와 `.env`에 같은 이름이 있으면 기존 셸 환경변수가 우선합니다. 실제 API 키가 들어 있는 `.env` 파일은 커밋하지 마세요.
 
 ### 4. 티커 목록만 미리 확인하기
 
@@ -133,7 +134,7 @@ python script.py
 실행 시 다음 작업이 순서대로 수행됩니다.
 
 1. Wikipedia에서 현재 S&P 500 종목과 최근 3년 내 편출 종목을 읽습니다.
-2. 최종 티커 목록을 `sp500_tickers_3years.txt`에 저장합니다.
+2. `ticker_info/` 폴더를 자동 생성하고 최종 티커 목록을 `ticker_info/sp500_tickers_3years.txt`에 저장합니다.
 3. 각 티커의 `market_data/{TICKER}_5min_historical.parquet` 파일을 확인합니다.
 4. 파일이 없으면 현재 UTC 시각 기준 최근 3년치를 요청합니다.
 5. 파일이 있으면 저장된 마지막 시각의 5분 뒤부터 증분 데이터를 요청합니다.
@@ -155,7 +156,7 @@ python check_data.py
 python data_report.py
 ```
 
-두 스크립트 모두 `market_data/*_5min_historical.parquet`를 전부 읽습니다. 데이터가 많으면 검사에도 메모리와 시간이 필요하며, `data_report.py`는 기존 `data_audit_report.txt`를 새 결과로 덮어씁니다.
+두 스크립트 모두 `market_data/*_5min_historical.parquet`를 전부 읽습니다. 데이터가 많으면 검사에도 메모리와 시간이 필요하며, `data_report.py`는 `report/` 폴더를 자동 생성하고 기존 `report/data_audit_report.txt`를 새 결과로 덮어씁니다.
 
 ## 저장 데이터 형식
 

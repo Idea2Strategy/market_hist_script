@@ -49,19 +49,12 @@ Wikipedia S&P 500 목록/변경 이력
 | `data_report.py` | 전 종목 검사 결과와 백테스트 가이드를 `report/data_audit_report.txt`로 생성 |
 | `.env.example` | Alpaca 인증정보 형식 예시 |
 | `requirements.txt` | 머신별 가상환경 경로 없이 정리한 프로젝트 런타임 의존성 |
-| `market_data/csv/` | CSV를 선택했을 때 생성되는 종목별 데이터. Git 추적 제외 |
-| `market_data/parquet/` | Parquet을 선택했을 때 생성되는 종목별 데이터. Git 추적 제외 |
-| `ticker_info/sp500_tickers_3years.txt` | 마지막 실행에서 만든 수집 대상 티커 목록. Git 추적 제외 |
-| `report/data_audit_report.txt` | `data_report.py`가 생성하는 상세 검사 보고서. Git 추적 제외 |
 
 ## 사전 준비
 
 - Python 3.10 권장
-- 인터넷 연결
 - 유효한 Alpaca 계정과 Market Data API Key/Secret Key
 - 전체 수집 결과를 저장할 충분한 디스크 공간
-
-전체 S&P 500과 최근 편출 종목을 3년치 5분봉으로 저장하므로 최초 실행은 오래 걸릴 수 있고 결과는 GB 단위가 될 수 있습니다. 사용 가능한 과거 데이터와 실시간 지연 범위는 Alpaca 계정의 데이터 구독 조건에 따라 달라질 수 있습니다.
 
 ## 빠른 시작
 

@@ -10,6 +10,7 @@ Wikipedia와 Alpaca에서 최근 3년의 S&P 500 관련 종목을 수집하고, 
 script/
 ├── data_collection/              # API 호출 및 크롤링
 │   ├── script.py
+│   ├── collect_sip_1min.py
 │   ├── get_ticker.py
 │   └── README.md
 ├── data_filtering/               # 정규장 데이터 필터링
@@ -44,6 +45,9 @@ script/
 ├── adjust_market_data/           # 배당·분할 반영 데이터
 │   ├── csv/
 │   └── parquet/
+├── sip_market_data/              # SIP 최근 3년 1분봉
+│   ├── raw/{csv,parquet}/
+│   └── adjusted/{csv,parquet}/
 ├── regular_market_data/          # 정규장 필터 결과
 │   ├── raw/{csv,parquet}/
 │   └── adjusted/{csv,parquet}/
@@ -61,6 +65,7 @@ script/
 | `market_data/` | `data_collection/script.py` | Raw 5분봉 CSV 또는 Parquet |
 | `adjust_market_data/` | `data_collection/script.py` | 수정주가 5분봉 CSV 또는 Parquet |
 | `ticker_info/` | `data_collection/script.py` | 수집 대상 티커 목록 |
+| `sip_market_data/` | `data_collection/collect_sip_1min.py` | SIP 최근 3년 1분봉 Raw/Adjusted 데이터 |
 | `regular_market_data/` | `data_filtering/filter_regular_session.py` | 휴장·조기 폐장·서머타임을 반영한 정규장 데이터 |
 | `report/data_audit_report.txt` | `data_validation/data_report.py` | Raw Parquet 전체 검사 보고서 |
 | `report/regular_session_audit/` | `data_validation/audit_regular_session.py` | 종목별 기간·커버리지와 누락 구간 CSV |

@@ -51,6 +51,9 @@ script/
 ├── regular_market_data/          # 정규장 필터 결과
 │   ├── raw/{csv,parquet}/
 │   └── adjusted/{csv,parquet}/
+├── regular_sip_market_data/      # SIP 1분봉 정규장 필터 결과
+│   ├── raw/{csv,parquet}/
+│   └── adjusted/{csv,parquet}/
 ├── ticker_info/
 │   └── sp500_tickers_3years.txt
 └── report/
@@ -67,6 +70,7 @@ script/
 | `ticker_info/` | `data_collection/script.py` | 수집 대상 티커 목록 |
 | `sip_market_data/` | `data_collection/collect_sip_1min.py` | SIP 최근 3년 1분봉 Raw/Adjusted 데이터 |
 | `regular_market_data/` | `data_filtering/filter_regular_session.py` | 휴장·조기 폐장·서머타임을 반영한 정규장 데이터 |
+| `regular_sip_market_data/` | `data_filtering/filter_regular_session.py` | SIP 1분봉의 정규장 필터 결과 |
 | `report/data_audit_report.txt` | `data_validation/data_report.py` | Raw Parquet 전체 검사 보고서 |
 | `report/regular_session_audit/` | `data_validation/audit_regular_session.py` | 종목별 기간·커버리지와 누락 구간 CSV |
 

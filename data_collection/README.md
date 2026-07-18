@@ -36,6 +36,12 @@ python data_collection/collect_sip_1min.py --data-type raw --format parquet --sy
 
 전체 S&P 500 관련 종목의 3년치 1분봉은 API 요청 수, 실행 시간과 저장 공간이 매우 큽니다. 작은 종목 목록으로 먼저 검증한 뒤 전체 수집을 권장합니다.
 
+수집한 SIP 1분봉에서 정규장 데이터만 분리하려면 다음 명령을 실행하고 SIP 데이터셋을 선택합니다.
+
+```bash
+python data_filtering/filter_regular_session.py --dataset sip
+```
+
 ## 생성되는 폴더와 파일
 
 | 선택 | 생성 경로 |

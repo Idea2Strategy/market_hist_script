@@ -1,0 +1,417 @@
+"""Collect three years of one-minute US equity bars from Alpaca's SIP feed."""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pandas as pd
+from alpaca.data.enums import Adjustment, DataFeed
+from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.requests import StockBarsRequest
+from alpaca.data.timeframe import TimeFrame
+from dotenv import load_dotenv
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from data_collection.get_ticker import get_historical_sp500_tickers
+
+
+YEARS_TO_COLLECT = 3
+END_DELAY_MINUTES = 15
+DEFAULT_CHUNK_DAYS = 7
+DEFAULT_REQUEST_DELAY_SECONDS = 0.35
+TICKER_FILE = PROJECT_ROOT / "ticker_info" / "sp500_tickers_3years.txt"
+
+
+def choose_data_type() -> str:
+    choices = {
+        "": "raw",
+        "1": "raw",
+        "raw": "raw",
+        "2": "adjusted",
+        "adjusted": "adjusted",
+        "adjust": "adjusted",
+    }
+
+    print("=" * 54)
+    print(" [선택 1] SIP 데이터 타입을 선택해 주세요.")
+    print("  1. Raw 데이터 (기본값)")
+    print("  2. Adjusted 데이터 (배당/분할 반영)")
+    print("=" * 54)
+    while True:
+        try:
+            choice = input("선택 [1/2]: ").strip().lower()
+        except EOFError:
+            choice = ""
+        if choice in choices:
+            return choices[choice]
+        print("잘못된 입력입니다. 1(Raw) 또는 2(Adjusted)를 입력해 주세요.")
+
+
+def choose_storage_format() -> str:
+    choices = {
+        "": "csv",
+        "1": "csv",
+        "csv": "csv",
+        ".csv": "csv",
+        "2": "parquet",
+        "parquet": "parquet",
+        ".parquet": "parquet",
+    }
+
+    print("\n" + "=" * 54)
+    print(" [선택 2] 저장 형식을 선택해 주세요.")
+    print("  1. CSV (기본값)")
+    print("  2. Parquet")
+    print("=" * 54)
+    while True:
+        try:
+            choice = input("선택 [1/2]: ").strip().lower()
+        except EOFError:
+            choice = ""
+        if choice in choices:
+            return choices[choice]
+        print("잘못된 입력입니다. 1(CSV) 또는 2(Parquet)를 입력해 주세요.")
+
+
+def collection_window(now: datetime | None = None) -> tuple[datetime, datetime]:
+    """Return the exact three-year window ending 15 minutes before now."""
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    current = current.astimezone(timezone.utc)
+    start_time = (pd.Timestamp(current) - pd.DateOffset(years=YEARS_TO_COLLECT)).to_pydatetime()
+    end_time = current - timedelta(minutes=END_DELAY_MINUTES)
+    return start_time, end_time
+
+
+def storage_path(
+    symbol: str,
+    data_type: str,
+    storage_format: str,
+    output_root: Path,
+) -> Path:
+    safe_symbol = symbol.replace("/", "-")
+    return (
+        output_root
+        / data_type
+        / storage_format
+        / f"{safe_symbol}_1min_sip_historical.{storage_format}"
+    )
+
+
+def load_local_data(file_path: Path, storage_format: str) -> pd.DataFrame:
+    if storage_format == "parquet":
+        dataframe = pd.read_parquet(file_path)
+    else:
+        dataframe = pd.read_csv(file_path)
+        required = {"symbol", "timestamp"}
+        missing = required.difference(dataframe.columns)
+        if missing:
+            raise ValueError(f"필수 CSV 컬럼이 없습니다: {', '.join(sorted(missing))}")
+        dataframe["timestamp"] = pd.to_datetime(
+            dataframe["timestamp"], errors="raise", utc=True
+        )
+        dataframe = dataframe.set_index(["symbol", "timestamp"])
+
+    if "timestamp" not in dataframe.index.names:
+        raise ValueError("인덱스에 timestamp 레벨이 없습니다.")
+    return dataframe
+
+
+def save_local_data(
+    dataframe: pd.DataFrame,
+    file_path: Path,
+    storage_format: str,
+) -> None:
+    """Write a completed symbol atomically so interrupted downloads stay recoverable."""
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = file_path.with_name(f".{file_path.name}.tmp")
+    try:
+        if storage_format == "parquet":
+            dataframe.to_parquet(temporary_path)
+        else:
+            dataframe.to_csv(temporary_path, index=True)
+        os.replace(temporary_path, file_path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
+def trim_to_window(
+    dataframe: pd.DataFrame,
+    start_time: datetime,
+    end_time: datetime,
+) -> pd.DataFrame:
+    if dataframe.empty:
+        return dataframe.copy()
+    timestamps = pd.DatetimeIndex(
+        pd.to_datetime(
+            dataframe.index.get_level_values("timestamp"),
+            errors="raise",
+            utc=True,
+        )
+    )
+    mask = (timestamps >= start_time) & (timestamps < end_time)
+    return dataframe.loc[mask].copy()
+
+
+def merge_frames(
+    existing: pd.DataFrame,
+    new_frames: list[pd.DataFrame],
+    start_time: datetime,
+    end_time: datetime,
+) -> pd.DataFrame:
+    frames = [frame for frame in [existing, *new_frames] if not frame.empty]
+    if not frames:
+        return existing.iloc[0:0].copy()
+    combined = pd.concat(frames)
+    combined = combined[~combined.index.duplicated(keep="last")].sort_index()
+    return trim_to_window(combined, start_time, end_time)
+
+
+def fetch_chunk(
+    client: StockHistoricalDataClient,
+    symbol: str,
+    start_time: datetime,
+    end_time: datetime,
+    data_type: str,
+    retries: int = 3,
+) -> pd.DataFrame | None:
+    adjustment = Adjustment.ALL if data_type == "adjusted" else Adjustment.RAW
+    request = StockBarsRequest(
+        symbol_or_symbols=[symbol],
+        timeframe=TimeFrame.Minute,
+        start=start_time,
+        end=end_time,
+        adjustment=adjustment,
+        feed=DataFeed.SIP,
+    )
+
+    for attempt in range(1, retries + 1):
+        try:
+            bars = client.get_stock_bars(request)
+            dataframe = bars.df
+            return dataframe if not dataframe.empty else pd.DataFrame()
+        except Exception as exc:
+            if attempt == retries:
+                print(f"[{symbol}] 요청 실패 ({start_time} ~ {end_time}): {exc}")
+                return None
+            wait_seconds = 2 ** (attempt - 1)
+            print(
+                f"[{symbol}] 요청 재시도 {attempt}/{retries - 1} "
+                f"({wait_seconds}초 후): {exc}"
+            )
+            time.sleep(wait_seconds)
+    return None
+
+
+def fetch_range(
+    client: StockHistoricalDataClient,
+    symbol: str,
+    start_time: datetime,
+    end_time: datetime,
+    data_type: str,
+    chunk_days: int,
+    request_delay: float,
+) -> list[pd.DataFrame] | None:
+    frames: list[pd.DataFrame] = []
+    chunk_start = start_time
+    while chunk_start < end_time:
+        chunk_end = min(chunk_start + timedelta(days=chunk_days), end_time)
+        dataframe = fetch_chunk(
+            client,
+            symbol,
+            chunk_start,
+            chunk_end,
+            data_type,
+        )
+        if dataframe is None:
+            return None
+        if not dataframe.empty:
+            frames.append(dataframe)
+        print(
+            f"[{symbol}] {chunk_start.date()} ~ {chunk_end.date()}: "
+            f"{len(dataframe):,}행"
+        )
+        chunk_start = chunk_end
+        if request_delay > 0:
+            time.sleep(request_delay)
+    return frames
+
+
+def process_symbol(
+    client: StockHistoricalDataClient,
+    symbol: str,
+    data_type: str,
+    storage_format: str,
+    output_root: Path,
+    start_time: datetime,
+    end_time: datetime,
+    chunk_days: int,
+    request_delay: float,
+) -> bool:
+    file_path = storage_path(symbol, data_type, storage_format, output_root)
+    existing = pd.DataFrame()
+    if file_path.exists():
+        try:
+            existing = trim_to_window(
+                load_local_data(file_path, storage_format),
+                start_time,
+                end_time,
+            )
+        except (OSError, ValueError, ImportError) as exc:
+            print(f"[{symbol}] 기존 파일 읽기 실패: {exc}")
+            return False
+
+    if existing.empty:
+        fetch_start = start_time
+    else:
+        last_timestamp = pd.Timestamp(
+            existing.index.get_level_values("timestamp").max()
+        ).to_pydatetime()
+        fetch_start = max(start_time, last_timestamp + timedelta(minutes=1))
+
+    new_frames: list[pd.DataFrame] = []
+    if fetch_start < end_time:
+        fetched = fetch_range(
+            client,
+            symbol,
+            fetch_start,
+            end_time,
+            data_type,
+            chunk_days,
+            request_delay,
+        )
+        if fetched is None:
+            print(f"[{symbol}] 저장하지 않음: 일부 기간 요청 실패")
+            return False
+        new_frames = fetched
+
+    combined = merge_frames(existing, new_frames, start_time, end_time)
+    if combined.empty:
+        print(f"[{symbol}] 저장할 데이터가 없습니다.")
+        return True
+
+    save_local_data(combined, file_path, storage_format)
+    added_rows = sum(len(frame) for frame in new_frames)
+    print(
+        f"[{symbol}] 저장 완료: +{added_rows:,}행, 총 {len(combined):,}행 -> {file_path}"
+    )
+    return True
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="최근 3년의 미국 주식 1분봉을 Alpaca SIP 피드로 수집합니다."
+    )
+    parser.add_argument(
+        "--data-type",
+        choices=("raw", "adjusted"),
+        help="데이터 타입 (미지정 시 실행 중 선택)",
+    )
+    parser.add_argument(
+        "--format",
+        dest="storage_format",
+        choices=("csv", "parquet"),
+        help="저장 형식 (미지정 시 실행 중 선택)",
+    )
+    parser.add_argument(
+        "--symbols",
+        help="쉼표로 구분한 종목 목록 (미지정 시 최근 3년 S&P 500 관련 종목)",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=PROJECT_ROOT / "sip_market_data",
+        help="결과 루트 폴더",
+    )
+    parser.add_argument(
+        "--chunk-days",
+        type=int,
+        default=DEFAULT_CHUNK_DAYS,
+        help=f"API 요청당 기간 일수 (기본값: {DEFAULT_CHUNK_DAYS})",
+    )
+    parser.add_argument(
+        "--request-delay",
+        type=float,
+        default=DEFAULT_REQUEST_DELAY_SECONDS,
+        help=f"요청 사이 대기 초 (기본값: {DEFAULT_REQUEST_DELAY_SECONDS})",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    if args.chunk_days <= 0 or args.request_delay < 0:
+        print("[오류] chunk-days는 양수, request-delay는 0 이상이어야 합니다.", file=sys.stderr)
+        return 2
+
+
+    load_dotenv(PROJECT_ROOT / ".env")
+    api_key = os.getenv("ALPACA_API_KEY")
+    secret_key = os.getenv("ALPACA_SECRET_KEY")
+    if not api_key or not secret_key:
+        print("[오류] Alpaca API 키와 Secret 키를 설정해 주세요.", file=sys.stderr)
+        return 1
+
+    data_type = args.data_type or choose_data_type()
+    storage_format = args.storage_format or choose_storage_format()
+    output_root = args.output_dir.expanduser().resolve()
+    start_time, end_time = collection_window()
+
+    if args.symbols:
+        symbols = sorted(
+            {symbol.strip().upper() for symbol in args.symbols.split(",") if symbol.strip()}
+        )
+    else:
+        print("Wikipedia에서 최근 3년 S&P 500 관련 티커를 확인합니다...")
+        symbols = get_historical_sp500_tickers(years=YEARS_TO_COLLECT)
+        TICKER_FILE.parent.mkdir(parents=True, exist_ok=True)
+        TICKER_FILE.write_text("\n".join(symbols) + "\n", encoding="utf-8")
+
+    print("=" * 70)
+    print("피드       : SIP")
+    print("봉 간격    : 1분")
+    print(f"데이터 타입: {data_type}")
+    print(f"저장 형식  : {storage_format}")
+    print(f"수집 기간  : {start_time.isoformat()} ~ {end_time.isoformat()}")
+    print(f"대상 종목  : {len(symbols)}개")
+    print(f"저장 폴더  : {output_root}")
+    print("=" * 70)
+    print("주의: 전체 종목의 3년치 1분봉은 실행 시간과 저장 공간이 매우 큽니다.")
+
+    client = StockHistoricalDataClient(api_key, secret_key)
+    failed_symbols: list[str] = []
+    for index, symbol in enumerate(symbols, 1):
+        print(f"\n[{index}/{len(symbols)}] {symbol} 수집 시작")
+        succeeded = process_symbol(
+            client,
+            symbol,
+            data_type,
+            storage_format,
+            output_root,
+            start_time,
+            end_time,
+            args.chunk_days,
+            args.request_delay,
+        )
+        if not succeeded:
+            failed_symbols.append(symbol)
+
+    print("=" * 70)
+    print(f"완료: 성공 {len(symbols) - len(failed_symbols)}개, 실패 {len(failed_symbols)}개")
+    if failed_symbols:
+        print("실패 종목: " + ", ".join(failed_symbols))
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

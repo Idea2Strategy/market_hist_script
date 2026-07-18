@@ -9,6 +9,7 @@
 - Raw 데이터 또는 배당·분할을 반영한 수정주가 데이터를 선택할 수 있습니다.
 - 선택한 형식의 기존 파일이 있으면 마지막 타임스탬프 다음 5분봉부터 증분 갱신합니다.
 - 중복 인덱스를 제거하고 시간순으로 정렬해 저장합니다.
+- XNYS 공식 거래소 일정으로 휴장일, 조기 폐장, 서머타임을 반영해 정규장 데이터만 별도 저장합니다.
 - 종목별 데이터 기간, 행 수, 미국 정규장 데이터 비율을 검사합니다.
 - 전 종목 상세 결과와 백테스트 참고사항을 텍스트 보고서로 생성합니다.
 
@@ -40,7 +41,12 @@ Wikipedia S&P 500 목록/변경 이력
           csv/ 또는 parquet/
                 │
                 ▼
-       데이터 검사 및 보고서 생성
+          ┌─────┴─────┐
+          │           │
+    정규장 필터링    데이터 검사
+          │           │
+          ▼           ▼
+ regular_market_data/ 보고서 생성
 ```
 
 ## 프로젝트 구성
@@ -48,6 +54,7 @@ Wikipedia S&P 500 목록/변경 이력
 | 경로 | 역할 |
 | --- | --- |
 | `script.py` | 전체 티커 수집, Raw/수정주가 5분봉 최초 수집 및 증분 갱신 |
+| `filter_regular_session.py` | XNYS 공식 일정으로 정규장 봉만 필터링해 별도 폴더에 저장 |
 | `get_ticker.py` | Alpaca 호출 없이 최근 3년의 S&P 500 티커 목록만 확인 |
 | `check_data.py` | `market_data/parquet/`의 로컬 Parquet 전체 검사 후 요약과 앞 20개 종목을 터미널에 출력 |
 | `data_report.py` | 전 종목 검사 결과와 백테스트 가이드를 `report/data_audit_report.txt`로 생성 |
@@ -94,6 +101,7 @@ python -m pip install -r requirements.txt
 
 - `alpaca-py`: Alpaca 과거 주가 API 호출
 - `pandas`: 티커 테이블 파싱 및 시계열 처리
+- `pandas-market-calendars`: XNYS 거래일, 정규 개장·폐장, 휴장 및 조기 폐장 일정 계산
 - `pyarrow`: Parquet 형식을 선택했을 때의 읽기와 쓰기
 - `lxml`: `pandas.read_html()`의 Wikipedia 표 파싱
 - `python-dotenv`: 프로젝트 루트의 `.env` 파일에서 Alpaca 인증정보 로드
@@ -162,7 +170,57 @@ Raw와 Adjusted 데이터, CSV와 Parquet은 각각 독립적으로 관리됩니
 
 수집 종료 시점은 코드상 `현재 UTC 시각 - 30분`입니다. 이는 무료 플랜의 지연 제한을 피하기 위한 여유값입니다. 종목별 요청 사이에는 API 과부하 방지를 위해 0.5초의 대기 시간이 있습니다.
 
-### 6. 수집 결과 검증하기
+### 6. 정규장 데이터만 분리하기
+
+수집한 Raw/Adjusted 데이터에서 미국 주식 정규장에 포함되는 5분봉만 별도 폴더로 복사합니다.
+
+```bash
+python filter_regular_session.py
+```
+
+기본 실행은 존재하는 Raw/Adjusted, CSV/Parquet 입력 폴더를 모두 확인합니다. 입력 폴더나 파일이 없는 조합은 건너뛰며, 결과는 다음 구조로 저장합니다.
+
+```text
+regular_market_data/
+├── raw/
+│   ├── csv/
+│   └── parquet/
+└── adjusted/
+    ├── csv/
+    └── parquet/
+```
+
+특정 조합만 처리하려면 옵션을 지정합니다.
+
+```bash
+# Raw CSV만 처리
+python filter_regular_session.py --data-type raw --format csv
+
+# Adjusted Parquet만 원하는 폴더에 저장
+python filter_regular_session.py \
+  --data-type adjusted \
+  --format parquet \
+  --output-dir ./my_regular_data
+```
+
+Windows PowerShell에서도 여러 줄 명령 대신 위 옵션을 한 줄로 이어서 실행하면 됩니다. 전체 옵션은 다음 명령으로 확인할 수 있습니다.
+
+```bash
+python filter_regular_session.py --help
+```
+
+기본 캘린더는 `XNYS`입니다. 각 봉의 시작 시각이 해당 거래일의 `market_open` 이상이고 `market_close` 미만일 때만 보존합니다. 따라서 다음 항목이 함께 반영됩니다.
+
+- 미국 동부 시간의 서머타임 전환
+- 주말과 미국 주식시장 휴장일
+- 독립기념일 전날 등 거래소의 조기 폐장
+- 캘린더에 등록된 임시 휴장 및 특별 거래 일정
+
+같은 파일을 다시 처리하면 결과 파일을 안전하게 교체하므로, 원본 데이터를 갱신한 뒤 명령을 다시 실행하면 됩니다. 원본 `market_data/`와 `adjust_market_data/` 파일은 변경하지 않습니다.
+
+`pandas-market-calendars`의 일정 규칙은 설치된 패키지에 포함되어 있으며 실행할 때 서버에서 갱신하지 않습니다. 새로 발표되거나 정정된 특별 거래 일정을 반영하려면 의존성을 최신 버전으로 갱신한 뒤 다시 필터링하세요.
+
+### 7. 수집 결과 검증하기
 
 터미널에서 전체 요약과 앞 20개 종목을 확인합니다.
 
@@ -187,6 +245,10 @@ market_data/csv/{TICKER}_5min_historical.csv
 market_data/parquet/{TICKER}_5min_historical.parquet
 adjust_market_data/csv/{TICKER}_5min_historical.csv
 adjust_market_data/parquet/{TICKER}_5min_historical.parquet
+regular_market_data/raw/csv/{TICKER}_5min_historical.csv
+regular_market_data/raw/parquet/{TICKER}_5min_historical.parquet
+regular_market_data/adjusted/csv/{TICKER}_5min_historical.csv
+regular_market_data/adjusted/parquet/{TICKER}_5min_historical.parquet
 ```
 
 파일 경로에서 `/`가 하위 폴더 구분자로 해석되지 않도록 `BRK/B`와 같은 Alpaca 티커는 `BRK-B_5min_historical.csv` 또는 `.parquet`이라는 이름으로 저장합니다. 파일 내부의 `symbol` 값은 원래 Alpaca 티커인 `BRK/B`로 유지됩니다.
@@ -232,18 +294,4 @@ print(df.columns)
 print(df.head())
 ```
 
-미국 정규장 데이터만 사용할 경우 타임스탬프를 고정된 UTC 오프셋으로 계산하지 말고 뉴욕 시간대로 변환해야 합니다. 그래야 서머타임이 자동 반영됩니다.
-
-```python
-timestamps = df.index.get_level_values("timestamp")
-new_york_time = timestamps.tz_convert("America/New_York")
-
-minutes = new_york_time.hour * 60 + new_york_time.minute
-regular_mask = (
-    (new_york_time.weekday < 5)
-    & (minutes >= 9 * 60 + 30)
-    & (minutes < 16 * 60)
-)
-
-regular_market_df = df[regular_mask]
-```
+미국 정규장 데이터는 `filter_regular_session.py`로 생성하세요. 고정 UTC 오프셋이나 평일 09:30~16:00 조건만 사용하면 서머타임뿐 아니라 휴장일과 조기 폐장을 정확히 반영할 수 없습니다.

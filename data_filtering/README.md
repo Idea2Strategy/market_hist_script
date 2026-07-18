@@ -8,6 +8,8 @@
 
 실행 시 원본 데이터셋, Raw/Adjusted, CSV/Parquet을 차례로 선택합니다. `pandas-market-calendars`의 `XNYS` 일정으로 거래일, 휴장, 조기 폐장과 서머타임을 반영하며 봉 간격과 관계없이 봉 시작 시각이 정규장 안에 있는 행만 남깁니다. 원본 파일은 수정하지 않습니다.
 
+`timestamp`는 ISO 날짜 문자열과 Unix epoch 숫자를 모두 인식합니다. 숫자형은 초·밀리초·마이크로초·나노초 단위를 자동 판별하며 결과 인덱스는 UTC datetime으로 통일합니다. Alpaca JSON에서 보이는 `1689697260000` 같은 값도 밀리초로 처리됩니다.
+
 ```bash
 python data_filtering/filter_regular_session.py
 ```

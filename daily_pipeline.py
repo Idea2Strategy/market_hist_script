@@ -26,13 +26,19 @@ from data_filtering.filter_regular_session import (
     build_sources,
     process_source,
 )
+from data_filtering.resample_sip_5min import (
+    DESTINATION_ROOT as RESAMPLED_ROOT,
+    build_resample_source,
+    process_resample_source,
+)
 from data_validation.audit_regular_session import audit_source, save_report
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DATA_TYPE = "adjusted"
 DATASET = "sip"
-BAR_FREQUENCY = pd.Timedelta(minutes=1)
+ONE_MINUTE_FREQUENCY = pd.Timedelta(minutes=1)
+FIVE_MINUTE_FREQUENCY = pd.Timedelta(minutes=5)
 MIN_EXPECTED_TICKERS = 400
 TICKER_FILE = PROJECT_ROOT / "ticker_info" / "sp500_tickers_3years.txt"
 COLLECTION_ROOT = PROJECT_ROOT / "sip_market_data"
@@ -183,26 +189,43 @@ def run_filter(storage_format: str) -> tuple[int, int, int]:
     return process_source(source, DEFAULT_CALENDAR)
 
 
-def run_validation(storage_format: str) -> tuple[int, int]:
-    source_dir = FILTERED_ROOT / DATA_TYPE / storage_format
-    summary, intervals = audit_source(
-        source_dir,
-        storage_format,
-        DEFAULT_CALENDAR,
-        BAR_FREQUENCY,
-    )
-    if summary.empty:
-        raise RuntimeError("검사할 SIP 정규장 데이터 파일이 없습니다.")
+def run_resample(storage_format: str) -> tuple[int, int, int]:
+    source = build_resample_source(storage_format)
+    return process_resample_source(source, DEFAULT_CALENDAR)
 
-    prefix = f"{DATA_TYPE}_{storage_format}"
-    summary_path = REPORT_ROOT / f"{prefix}_summary.csv"
-    intervals_path = REPORT_ROOT / f"{prefix}_missing_intervals.csv"
-    save_report(summary, summary_path)
-    save_report(intervals, intervals_path)
-    error_count = int(summary["status"].astype(str).str.startswith("error:").sum())
-    print(f"요약 보고서: {summary_path}")
-    print(f"누락 구간 보고서: {intervals_path}")
-    return len(summary), error_count
+
+def run_validation(storage_format: str) -> tuple[int, int]:
+    total_files = 0
+    total_errors = 0
+    sources = (
+        ("1min", FILTERED_ROOT, ONE_MINUTE_FREQUENCY),
+        ("5min", RESAMPLED_ROOT, FIVE_MINUTE_FREQUENCY),
+    )
+    for label, source_root, bar_frequency in sources:
+        source_dir = source_root / DATA_TYPE / storage_format
+        summary, intervals = audit_source(
+            source_dir,
+            storage_format,
+            DEFAULT_CALENDAR,
+            bar_frequency,
+        )
+        if summary.empty:
+            raise RuntimeError(f"검사할 SIP {label} 정규장 데이터 파일이 없습니다.")
+
+        prefix = f"{DATA_TYPE}_{storage_format}"
+        report_dir = REPORT_ROOT / label
+        summary_path = report_dir / f"{prefix}_summary.csv"
+        intervals_path = report_dir / f"{prefix}_missing_intervals.csv"
+        save_report(summary, summary_path)
+        save_report(intervals, intervals_path)
+        error_count = int(
+            summary["status"].astype(str).str.startswith("error:").sum()
+        )
+        total_files += len(summary)
+        total_errors += error_count
+        print(f"[{label}] 요약 보고서: {summary_path}")
+        print(f"[{label}] 누락 구간 보고서: {intervals_path}")
+    return total_files, total_errors
 
 
 def run_pipeline(storage_format: str, now: datetime | None = None) -> int:
@@ -232,7 +255,7 @@ def run_pipeline(storage_format: str, now: datetime | None = None) -> int:
     print("=" * 72)
 
     client = StockHistoricalDataClient(api_key, secret_key)
-    print("\n[1/3] SIP Adjusted 1분봉 수집·증분 갱신")
+    print("\n[1/4] SIP Adjusted 1분봉 수집·증분 갱신")
     failed_symbols = run_collection(
         client,
         symbols,
@@ -241,13 +264,20 @@ def run_pipeline(storage_format: str, now: datetime | None = None) -> int:
         end_time,
     )
 
-    print("\n[2/3] XNYS 정규장 필터링")
+    print("\n[2/4] XNYS 정규장 1분봉 필터링")
     try:
         processed_files, total_rows, kept_rows = run_filter(storage_format)
         if processed_files == 0:
             raise RuntimeError("필터링할 수집 파일이 없습니다.")
 
-        print("\n[3/3] SIP 1분봉 기간·누락 구간 검사")
+        print("\n[3/4] 정규장 1분봉에서 SIP 5분봉 생성")
+        resampled_files, one_minute_rows, five_minute_rows = run_resample(
+            storage_format
+        )
+        if resampled_files == 0:
+            raise RuntimeError("5분봉으로 변환할 정규장 1분봉 파일이 없습니다.")
+
+        print("\n[4/4] SIP 1분봉·5분봉 기간 및 누락 구간 검사")
         audited_files, audit_errors = run_validation(storage_format)
     except (OSError, RuntimeError, ValueError, ImportError) as exc:
         print(f"[오류] 후처리 실패: {exc}", file=sys.stderr)
@@ -256,7 +286,9 @@ def run_pipeline(storage_format: str, now: datetime | None = None) -> int:
     print("=" * 72)
     print(
         f"완료: 수집 성공 {len(symbols) - len(failed_symbols)}/{len(symbols)}개, "
-        f"필터 {processed_files}개 파일 ({total_rows:,} -> {kept_rows:,}행), "
+        f"1분봉 필터 {processed_files}개 파일 ({total_rows:,} -> {kept_rows:,}행), "
+        f"5분봉 {resampled_files}개 파일 "
+        f"({one_minute_rows:,} -> {five_minute_rows:,}행), "
         f"검사 {audited_files}개 파일"
     )
     if failed_symbols:
@@ -269,7 +301,8 @@ def run_pipeline(storage_format: str, now: datetime | None = None) -> int:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "SIP Adjusted 1분봉을 갱신하고 정규장 필터링과 데이터 검사를 수행합니다."
+            "SIP Adjusted 1분봉을 갱신하고 정규장 필터링, 5분봉 생성과 "
+            "데이터 검사를 수행합니다."
         )
     )
     parser.add_argument(

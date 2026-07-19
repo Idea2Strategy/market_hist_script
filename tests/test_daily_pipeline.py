@@ -92,6 +92,10 @@ class DailyPipelineTests(unittest.TestCase):
             patch("daily_pipeline.StockHistoricalDataClient") as mock_client,
             patch("daily_pipeline.run_collection", return_value=[]) as mock_collect,
             patch("daily_pipeline.run_filter", return_value=(1, 100, 80)) as mock_filter,
+            patch(
+                "daily_pipeline.run_resample",
+                return_value=(1, 80, 16),
+            ) as mock_resample,
             patch("daily_pipeline.run_validation", return_value=(1, 0)) as mock_audit,
         ):
             result = run_pipeline("parquet")
@@ -105,6 +109,7 @@ class DailyPipelineTests(unittest.TestCase):
             window[1],
         )
         mock_filter.assert_called_once_with("parquet")
+        mock_resample.assert_called_once_with("parquet")
         mock_audit.assert_called_once_with("parquet")
 
 

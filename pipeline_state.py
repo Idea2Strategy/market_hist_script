@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -11,10 +12,32 @@ from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_STATE_PATH = PROJECT_ROOT / "pipeline_state" / "daily_pipeline_state.json"
+STATE_REPLACE_ATTEMPTS = 6
+STATE_REPLACE_RETRY_SECONDS = 0.1
 
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def replace_with_retry(
+    source: Path,
+    destination: Path,
+    attempts: int = STATE_REPLACE_ATTEMPTS,
+    retry_seconds: float = STATE_REPLACE_RETRY_SECONDS,
+) -> None:
+    """Replace a state file while tolerating brief Windows file locks."""
+    if attempts < 1:
+        raise ValueError("attempts must be positive")
+
+    for attempt in range(attempts):
+        try:
+            os.replace(source, destination)
+            return
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(retry_seconds * (2**attempt))
 
 
 class PipelineStateStore:
@@ -36,14 +59,16 @@ class PipelineStateStore:
 
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        temporary_path = self.path.with_name(f".{self.path.name}.tmp")
+        temporary_path = self.path.with_name(
+            f".{self.path.name}.{os.getpid()}.tmp"
+        )
         self.data["updated_at_utc"] = utc_now_iso()
         try:
             temporary_path.write_text(
                 json.dumps(self.data, ensure_ascii=False, indent=2) + "\n",
                 encoding="utf-8",
             )
-            os.replace(temporary_path, self.path)
+            replace_with_retry(temporary_path, self.path)
         finally:
             temporary_path.unlink(missing_ok=True)
 

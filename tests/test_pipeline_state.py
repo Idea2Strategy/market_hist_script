@@ -2,8 +2,9 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import call, patch
 
-from pipeline_state import PipelineStateStore
+from pipeline_state import PipelineStateStore, replace_with_retry
 
 
 class PipelineStateStoreTests(unittest.TestCase):
@@ -60,6 +61,48 @@ class PipelineStateStoreTests(unittest.TestCase):
             reloaded = PipelineStateStore(state_path)
             self.assertEqual(reloaded.data["last_run"]["status"], "failed")
             self.assertEqual(reloaded.data["last_run"]["failure_count"], 1)
+
+    @patch("pipeline_state.time.sleep")
+    @patch("pipeline_state.os.replace")
+    def test_replace_retries_transient_permission_error(
+        self,
+        mock_replace,
+        mock_sleep,
+    ):
+        mock_replace.side_effect = [
+            PermissionError(5, "access denied"),
+            PermissionError(5, "access denied"),
+            None,
+        ]
+
+        replace_with_retry(Path("state.tmp"), Path("state.json"))
+
+        self.assertEqual(mock_replace.call_count, 3)
+        self.assertEqual(
+            mock_sleep.call_args_list,
+            [call(0.1), call(0.2)],
+        )
+
+    @patch("pipeline_state.time.sleep")
+    @patch(
+        "pipeline_state.os.replace",
+        side_effect=PermissionError(5, "access denied"),
+    )
+    def test_save_cleans_process_temp_file_after_retry_exhaustion(
+        self,
+        mock_replace,
+        mock_sleep,
+    ):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            store = PipelineStateStore(root / "state.json")
+
+            with self.assertRaises(PermissionError):
+                store.save()
+
+            self.assertEqual(mock_replace.call_count, 6)
+            self.assertEqual(mock_sleep.call_count, 5)
+            self.assertEqual(list(root.glob(".state.json.*.tmp")), [])
 
 
 if __name__ == "__main__":

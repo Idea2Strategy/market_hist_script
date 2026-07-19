@@ -27,7 +27,6 @@ from data_collection.get_ticker import get_historical_sp500_tickers
 from data_filtering.filter_regular_session import (
     DEFAULT_CALENDAR,
     build_sources,
-    prepare_regular_sip_1min_root,
     process_file_incrementally,
 )
 from data_filtering.resample_sip_5min import (
@@ -706,7 +705,6 @@ def run_pipeline(
         refresh_start = adjusted_refresh_start(end_time)
         print("Wikipedia에서 최근 3년 S&P 500 관련 티커를 갱신합니다...")
         symbols = load_pipeline_symbols()
-        prepare_regular_sip_1min_root(PROJECT_ROOT)
         state = PipelineStateStore()
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"[오류] 실행 준비 실패: {exc}", file=sys.stderr)

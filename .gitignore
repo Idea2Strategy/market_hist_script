@@ -8,7 +8,6 @@
 market_data/
 regular_market_data/
 sip_market_data/
-regular_sip_market_data/
 regular_sip_1min_market_data/
 regular_sip_5min_market_data/
 pipeline_state/

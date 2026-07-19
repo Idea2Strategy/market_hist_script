@@ -19,7 +19,6 @@ from data_filtering.filter_regular_session import (
     choose_data_type,
     choose_storage_format,
     load_market_data,
-    prepare_regular_sip_1min_root,
 )
 
 
@@ -373,13 +372,6 @@ def main(argv: list[str] | None = None) -> int:
     except RuntimeError as exc:
         print(f"[오류] 지원하지 않는 캘린더입니다: {args.calendar}\n{exc}", file=sys.stderr)
         return 2
-    try:
-        if args.dataset == "sip":
-            prepare_regular_sip_1min_root(PROJECT_ROOT)
-    except OSError as exc:
-        print(f"[오류] SIP 1분봉 결과 폴더 준비 실패: {exc}", file=sys.stderr)
-        return 1
-
     processed_files = 0
     for selected_type, selected_format, source_dir in selected_sources(
         PROJECT_ROOT, data_type, storage_format, args.dataset

@@ -16,7 +16,6 @@ from data_filtering.filter_regular_session import (
     parse_timestamp_values,
     process_file_incrementally,
     process_source,
-    prepare_regular_sip_1min_root,
     parse_args,
 )
 
@@ -190,39 +189,6 @@ class InteractiveSelectionTests(unittest.TestCase):
             default_output_root(Path("project"), "sip"),
             Path("project/regular_sip_1min_market_data"),
         )
-
-    def test_legacy_sip_output_root_is_renamed(self):
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            project_root = Path(temporary_directory)
-            legacy = project_root / "regular_sip_market_data"
-            legacy.mkdir()
-            sample = legacy / "sample.parquet"
-            sample.write_bytes(b"sample")
-
-            destination = prepare_regular_sip_1min_root(project_root)
-
-            self.assertEqual(
-                destination,
-                project_root / "regular_sip_1min_market_data",
-            )
-            self.assertTrue((destination / "sample.parquet").is_file())
-            self.assertFalse(legacy.exists())
-
-    def test_legacy_migration_refuses_to_merge_two_nonempty_roots(self):
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            project_root = Path(temporary_directory)
-            legacy = project_root / "regular_sip_market_data"
-            destination = project_root / "regular_sip_1min_market_data"
-            legacy.mkdir()
-            destination.mkdir()
-            (legacy / "old.parquet").write_bytes(b"old")
-            (destination / "new.parquet").write_bytes(b"new")
-
-            with self.assertRaises(FileExistsError):
-                prepare_regular_sip_1min_root(project_root)
-
-            self.assertTrue((legacy / "old.parquet").is_file())
-            self.assertTrue((destination / "new.parquet").is_file())
 
     def test_sip_csv_is_filtered_and_saved_end_to_end(self):
         with tempfile.TemporaryDirectory() as temporary_directory:

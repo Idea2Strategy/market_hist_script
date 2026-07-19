@@ -15,6 +15,8 @@ from pandas.api.types import is_datetime64_any_dtype
 
 
 DEFAULT_CALENDAR = "XNYS"
+REGULAR_SIP_1MIN_ROOT_NAME = "regular_sip_1min_market_data"
+LEGACY_REGULAR_SIP_ROOT_NAME = "regular_sip_market_data"
 
 
 @dataclass(frozen=True)
@@ -350,8 +352,26 @@ def choose_dataset() -> str:
 
 def default_output_root(project_root: Path, dataset: str) -> Path:
     """Return a separate output root so different feeds never mix."""
-    folder_name = "regular_sip_market_data" if dataset == "sip" else "regular_market_data"
+    folder_name = REGULAR_SIP_1MIN_ROOT_NAME if dataset == "sip" else "regular_market_data"
     return project_root / folder_name
+
+
+def prepare_regular_sip_1min_root(project_root: Path) -> Path:
+    """Rename the legacy SIP regular-session root when safe, then return it."""
+    destination = project_root / REGULAR_SIP_1MIN_ROOT_NAME
+    legacy = project_root / LEGACY_REGULAR_SIP_ROOT_NAME
+    if not legacy.exists():
+        return destination
+    if destination.exists():
+        if any(legacy.iterdir()):
+            raise FileExistsError(
+                f"기존 폴더와 새 폴더가 모두 존재합니다: {legacy}, {destination}"
+            )
+        legacy.rmdir()
+        return destination
+
+    legacy.rename(destination)
+    return destination
 
 
 def choose_data_type(step_number: int = 1) -> str:
@@ -450,11 +470,19 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     project_root = Path(__file__).resolve().parents[1]
     dataset = args.dataset or choose_dataset()
-    output_root = (
-        args.output_dir.expanduser().resolve()
-        if args.output_dir
-        else default_output_root(project_root, dataset)
-    )
+    try:
+        output_root = (
+            args.output_dir.expanduser().resolve()
+            if args.output_dir
+            else (
+                prepare_regular_sip_1min_root(project_root)
+                if dataset == "sip"
+                else default_output_root(project_root, dataset)
+            )
+        )
+    except OSError as exc:
+        print(f"[오류] SIP 1분봉 결과 폴더 준비 실패: {exc}", file=sys.stderr)
+        return 1
     data_type = args.data_type or choose_data_type(step_number=2)
     storage_format = args.storage_format or choose_storage_format(step_number=3)
 

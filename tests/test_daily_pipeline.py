@@ -100,6 +100,7 @@ class DailyPipelineTests(unittest.TestCase):
             patch("daily_pipeline.completed_collection_window", return_value=window),
             patch("daily_pipeline.adjusted_refresh_start", return_value=refresh_start),
             patch("daily_pipeline.load_pipeline_symbols", return_value=["AAPL"]),
+            patch("daily_pipeline.prepare_regular_sip_1min_root"),
             patch("daily_pipeline.PipelineStateStore") as mock_state_class,
             patch("daily_pipeline.DailyReportStore") as mock_report_store_class,
             patch("daily_pipeline.StockHistoricalDataClient") as mock_client,

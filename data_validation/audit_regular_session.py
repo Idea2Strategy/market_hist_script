@@ -19,6 +19,7 @@ from data_filtering.filter_regular_session import (
     choose_data_type,
     choose_storage_format,
     load_market_data,
+    prepare_regular_sip_1min_root,
 )
 
 
@@ -247,7 +248,11 @@ def selected_sources(
 ) -> list[tuple[str, str, Path]]:
     data_types = ("raw", "adjusted") if data_type == "all" else (data_type,)
     formats = ("csv", "parquet") if storage_format == "all" else (storage_format,)
-    root_name = "regular_sip_market_data" if dataset == "sip" else "regular_market_data"
+    root_name = (
+        "regular_sip_1min_market_data"
+        if dataset == "sip"
+        else "regular_market_data"
+    )
     roots = {
         "raw": project_root / root_name / "raw",
         "adjusted": project_root / root_name / "adjusted",
@@ -368,6 +373,12 @@ def main(argv: list[str] | None = None) -> int:
     except RuntimeError as exc:
         print(f"[오류] 지원하지 않는 캘린더입니다: {args.calendar}\n{exc}", file=sys.stderr)
         return 2
+    try:
+        if args.dataset == "sip":
+            prepare_regular_sip_1min_root(PROJECT_ROOT)
+    except OSError as exc:
+        print(f"[오류] SIP 1분봉 결과 폴더 준비 실패: {exc}", file=sys.stderr)
+        return 1
 
     processed_files = 0
     for selected_type, selected_format, source_dir in selected_sources(

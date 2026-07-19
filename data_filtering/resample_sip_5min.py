@@ -18,13 +18,14 @@ from data_filtering.filter_regular_session import (
     DEFAULT_CALENDAR,
     load_market_data,
     normalize_timestamp_index,
+    prepare_regular_sip_1min_root,
     save_market_data,
     session_open_for_timestamp,
     slice_timestamp_range,
 )
 
 
-SOURCE_ROOT = PROJECT_ROOT / "regular_sip_market_data"
+SOURCE_ROOT = PROJECT_ROOT / "regular_sip_1min_market_data"
 DESTINATION_ROOT = PROJECT_ROOT / "regular_sip_5min_market_data"
 DATA_TYPE = "adjusted"
 FIVE_MINUTES = "5min"
@@ -277,8 +278,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     storage_format = args.storage_format or choose_storage_format()
-    source = build_resample_source(storage_format)
     try:
+        prepare_regular_sip_1min_root(PROJECT_ROOT)
+        source = build_resample_source(storage_format)
         processed_files, source_rows, output_rows = process_resample_source(source)
     except (OSError, ValueError, ImportError) as exc:
         print(f"[오류] 5분봉 생성 실패: {exc}", file=sys.stderr)

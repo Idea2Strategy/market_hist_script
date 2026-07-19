@@ -135,11 +135,29 @@ def build_missing_intervals(
     return rows
 
 
+def count_missing_intervals(
+    missing: pd.DatetimeIndex,
+    calendar_name: str,
+    bar_frequency: pd.Timedelta,
+) -> int:
+    """Count contiguous gaps without materializing the detailed report rows."""
+    if missing.empty:
+        return 0
+
+    calendar = mcal.get_calendar(calendar_name)
+    local_dates = missing.tz_convert(calendar.tz).normalize()
+    breaks = (local_dates[1:] != local_dates[:-1]) | (
+        missing[1:] - missing[:-1] != bar_frequency
+    )
+    return 1 + int(breaks.sum())
+
+
 def audit_dataframe(
     dataframe: pd.DataFrame,
     symbol: str,
     calendar_name: str = DEFAULT_CALENDAR,
     bar_frequency: pd.Timedelta = BAR_FREQUENCY,
+    include_intervals: bool = True,
 ) -> tuple[dict[str, object], list[dict[str, object]]]:
     """Calculate observed coverage and missing regular-session intervals."""
     if dataframe.empty:
@@ -176,8 +194,15 @@ def audit_dataframe(
     )
     missing = expected.difference(observed)
     unexpected = observed.difference(expected)
-    intervals = build_missing_intervals(
-        missing, expected, observed, symbol, calendar_name, bar_frequency
+    missing_interval_count = count_missing_intervals(
+        missing, calendar_name, bar_frequency
+    )
+    intervals = (
+        build_missing_intervals(
+            missing, expected, observed, symbol, calendar_name, bar_frequency
+        )
+        if include_intervals
+        else []
     )
     covered_bars = len(expected.intersection(observed))
     coverage_pct = covered_bars / len(expected) * 100 if len(expected) else 0.0
@@ -196,7 +221,7 @@ def audit_dataframe(
         "expected_bars": len(expected),
         "missing_bars": len(missing),
         "coverage_pct": round(coverage_pct, 6),
-        "missing_intervals": len(intervals),
+        "missing_intervals": missing_interval_count,
         "duplicate_timestamps": len(timestamps) - len(observed),
         "unexpected_timestamps": len(unexpected),
     }
@@ -239,6 +264,7 @@ def audit_source(
     storage_format: str,
     calendar_name: str,
     bar_frequency: pd.Timedelta = BAR_FREQUENCY,
+    include_intervals: bool = True,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     input_files = sorted(source_dir.glob(f"*.{storage_format}"))
     summaries: list[dict[str, object]] = []
@@ -256,7 +282,11 @@ def audit_source(
         try:
             dataframe = load_market_data(input_path, storage_format)
             summary, missing_intervals = audit_dataframe(
-                dataframe, symbol, calendar_name, bar_frequency
+                dataframe,
+                symbol,
+                calendar_name,
+                bar_frequency,
+                include_intervals,
             )
             summary["file"] = input_path.name
             summaries.append(summary)

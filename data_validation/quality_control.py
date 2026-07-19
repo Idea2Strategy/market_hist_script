@@ -91,6 +91,7 @@ def quality_snapshot(
         zero_volume_rows = int(volume.eq(0).sum())
     summary["invalid_ohlcv_rows"] = len(invalid_rows)
     summary["zero_volume_rows"] = zero_volume_rows
+    summary["quality_mode"] = "deep"
     summary["status"] = (
         "warning"
         if summary.get("missing_bars", 0)
@@ -99,6 +100,60 @@ def quality_snapshot(
         else "ok"
     )
     return summary, intervals, invalid_rows
+
+
+def structural_snapshot(
+    dataframe: pd.DataFrame,
+    symbol: str,
+) -> tuple[dict[str, object], list[dict[str, object]]]:
+    """Build a fast source-integrity snapshot without calculating bar gaps."""
+    invalid_rows = invalid_market_rows(dataframe, symbol)
+    if dataframe.empty:
+        return (
+            {
+                "symbol": symbol,
+                "status": "empty",
+                "quality_mode": "fast",
+                "first_timestamp_utc": "",
+                "last_timestamp_utc": "",
+                "observed_rows": 0,
+                "unique_timestamps": 0,
+                "duplicate_timestamps": 0,
+                "invalid_ohlcv_rows": len(invalid_rows),
+                "zero_volume_rows": 0,
+                "repair_windows": 0,
+                "repaired_rows": 0,
+            },
+            invalid_rows,
+        )
+
+    timestamps = pd.DatetimeIndex(
+        pd.to_datetime(
+            dataframe.index.get_level_values("timestamp"),
+            errors="raise",
+            utc=True,
+        )
+    )
+    unique_timestamps = timestamps.unique().sort_values()
+    volume = pd.to_numeric(dataframe["volume"], errors="coerce")
+    duplicate_timestamps = len(timestamps) - len(unique_timestamps)
+    summary = {
+        "symbol": symbol,
+        "status": (
+            "warning" if duplicate_timestamps or invalid_rows else "ok"
+        ),
+        "quality_mode": "fast",
+        "first_timestamp_utc": unique_timestamps.min().isoformat(),
+        "last_timestamp_utc": unique_timestamps.max().isoformat(),
+        "observed_rows": len(dataframe),
+        "unique_timestamps": len(unique_timestamps),
+        "duplicate_timestamps": duplicate_timestamps,
+        "invalid_ohlcv_rows": len(invalid_rows),
+        "zero_volume_rows": int(volume.eq(0).sum()),
+        "repair_windows": 0,
+        "repaired_rows": 0,
+    }
+    return summary, invalid_rows
 
 
 def repair_windows(
@@ -136,10 +191,20 @@ def repair_symbol_file(
     chunk_days: int,
     request_delay: float,
     calendar_name: str = DEFAULT_CALENDAR,
+    deep_quality: bool = True,
 ) -> QualityResult:
     """Audit one source file, retry recent gaps, and return its final quality state."""
     try:
         dataframe = load_local_data(file_path, storage_format)
+        if not deep_quality:
+            summary, invalid_rows = structural_snapshot(dataframe, symbol)
+            return QualityResult(
+                True,
+                summary,
+                [],
+                invalid_rows,
+            )
+
         _, before_intervals, _ = quality_snapshot(dataframe, symbol, calendar_name)
         windows = repair_windows(before_intervals, repair_start)
         fetched_frames: list[pd.DataFrame] = []

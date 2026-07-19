@@ -73,6 +73,25 @@ class AuditRegularSessionTests(unittest.TestCase):
             "2025-02-03T14:32:00+00:00",
         )
 
+    def test_summary_only_counts_gaps_without_materializing_rows(self):
+        dataframe = self.make_frame(
+            [
+                "2025-02-03 14:30:00+00:00",
+                "2025-02-03 14:40:00+00:00",
+                "2025-02-03 14:50:00+00:00",
+            ]
+        )
+
+        summary, intervals = audit_dataframe(
+            dataframe,
+            "AAPL",
+            include_intervals=False,
+        )
+
+        self.assertEqual(summary["missing_bars"], 2)
+        self.assertEqual(summary["missing_intervals"], 2)
+        self.assertEqual(intervals, [])
+
 
 if __name__ == "__main__":
     unittest.main()

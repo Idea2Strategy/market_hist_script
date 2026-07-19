@@ -11,6 +11,7 @@ from data_validation.quality_control import (
     invalid_market_rows,
     repair_symbol_file,
     repair_windows,
+    structural_snapshot,
 )
 
 
@@ -76,6 +77,48 @@ class QualityControlTests(unittest.TestCase):
             ],
         )
 
+    def test_structural_snapshot_skips_gap_calculation(self):
+        dataframe = self.make_frame(
+            ["2025-02-03 14:30:00Z", "2025-02-03 14:32:00Z"],
+            [100.0, 102.0],
+        )
+
+        summary, invalid_rows = structural_snapshot(dataframe, "AAPL")
+
+        self.assertEqual(summary["quality_mode"], "fast")
+        self.assertEqual(summary["status"], "ok")
+        self.assertEqual(summary["duplicate_timestamps"], 0)
+        self.assertNotIn("missing_bars", summary)
+        self.assertEqual(invalid_rows, [])
+
+    def test_fast_quality_does_not_request_missing_bars(self):
+        existing = self.make_frame(
+            ["2025-02-03 14:30:00Z", "2025-02-03 14:32:00Z"],
+            [100.0, 102.0],
+        )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "AAPL.csv"
+            save_local_data(existing, path, "csv")
+            with patch("data_validation.quality_control.fetch_range") as mock_fetch:
+                result = repair_symbol_file(
+                    object(),
+                    "AAPL",
+                    path,
+                    "csv",
+                    "adjusted",
+                    datetime(2025, 2, 3, 14, 30, tzinfo=timezone.utc),
+                    datetime(2025, 2, 3, 14, 33, tzinfo=timezone.utc),
+                    datetime(2025, 2, 3, 14, 30, tzinfo=timezone.utc),
+                    7,
+                    0,
+                    deep_quality=False,
+                )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.repaired_rows, 0)
+        self.assertEqual(result.missing_intervals, [])
+        mock_fetch.assert_not_called()
+
     def test_recent_missing_bar_is_fetched_and_merged(self):
         existing = self.make_frame(
             ["2025-02-03 14:30:00Z", "2025-02-03 14:32:00Z"],
@@ -113,4 +156,3 @@ class QualityControlTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

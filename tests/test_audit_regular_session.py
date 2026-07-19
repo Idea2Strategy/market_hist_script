@@ -50,6 +50,29 @@ class AuditRegularSessionTests(unittest.TestCase):
         self.assertEqual(summary["missing_bars"], 0)
         self.assertEqual(intervals, [])
 
+    def test_one_minute_sip_audit_uses_one_minute_frequency(self):
+        dataframe = self.make_frame(
+            [
+                "2025-02-03 14:30:00+00:00",
+                "2025-02-03 14:31:00+00:00",
+                "2025-02-03 14:33:00+00:00",
+            ]
+        )
+
+        summary, intervals = audit_dataframe(
+            dataframe,
+            "AAPL",
+            bar_frequency=pd.Timedelta(minutes=1),
+        )
+
+        self.assertEqual(summary["expected_bars"], 4)
+        self.assertEqual(summary["missing_bars"], 1)
+        self.assertEqual(intervals[0]["missing_minutes"], 1)
+        self.assertEqual(
+            intervals[0]["missing_start_utc"],
+            "2025-02-03T14:32:00+00:00",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

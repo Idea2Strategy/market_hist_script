@@ -1,4 +1,4 @@
-"""Audit filtered regular-session files for date coverage and missing 5-minute bars."""
+"""Audit filtered regular-session files for date coverage and missing bars."""
 
 from __future__ import annotations
 
@@ -39,8 +39,9 @@ def expected_regular_timestamps(
     first_timestamp: pd.Timestamp,
     last_timestamp: pd.Timestamp,
     calendar_name: str = DEFAULT_CALENDAR,
+    bar_frequency: pd.Timedelta = BAR_FREQUENCY,
 ) -> pd.DatetimeIndex:
-    """Return expected five-minute bar starts within the observed boundaries."""
+    """Return expected bar starts within the observed boundaries."""
     calendar = mcal.get_calendar(calendar_name)
     first_timestamp = pd.Timestamp(first_timestamp).tz_convert("UTC")
     last_timestamp = pd.Timestamp(last_timestamp).tz_convert("UTC")
@@ -61,7 +62,7 @@ def expected_regular_timestamps(
         for timestamp in pd.date_range(
             market_open,
             market_close,
-            freq=BAR_FREQUENCY,
+            freq=bar_frequency,
             inclusive="left",
         )
     ]
@@ -78,6 +79,7 @@ def build_missing_intervals(
     observed: pd.DatetimeIndex,
     symbol: str,
     calendar_name: str,
+    bar_frequency: pd.Timedelta = BAR_FREQUENCY,
 ) -> list[dict[str, object]]:
     """Group adjacent missing timestamps without joining separate sessions."""
     if missing.empty:
@@ -90,7 +92,7 @@ def build_missing_intervals(
 
     for position in range(1, len(missing)):
         same_session = missing_local_dates[position] == missing_local_dates[position - 1]
-        consecutive = missing[position] - missing[position - 1] == BAR_FREQUENCY
+        consecutive = missing[position] - missing[position - 1] == bar_frequency
         if not (same_session and consecutive):
             intervals.append((interval_start, position - 1))
             interval_start = position
@@ -102,9 +104,12 @@ def build_missing_intervals(
     for start_position, end_position in intervals:
         missing_start = missing[start_position]
         missing_end = missing[end_position]
-        previous_timestamp = missing_start - BAR_FREQUENCY
-        next_timestamp = missing_end + BAR_FREQUENCY
+        previous_timestamp = missing_start - bar_frequency
+        next_timestamp = missing_end + bar_frequency
         missing_bars = end_position - start_position + 1
+        missing_minutes = int(
+            missing_bars * bar_frequency / pd.Timedelta(minutes=1)
+        )
 
         rows.append(
             {
@@ -113,7 +118,7 @@ def build_missing_intervals(
                 "missing_start_utc": missing_start.isoformat(),
                 "missing_end_utc": missing_end.isoformat(),
                 "missing_bars": missing_bars,
-                "missing_minutes": missing_bars * 5,
+                "missing_minutes": missing_minutes,
                 "previous_bar_utc": (
                     previous_timestamp.isoformat()
                     if previous_timestamp in expected_set
@@ -134,6 +139,7 @@ def audit_dataframe(
     dataframe: pd.DataFrame,
     symbol: str,
     calendar_name: str = DEFAULT_CALENDAR,
+    bar_frequency: pd.Timedelta = BAR_FREQUENCY,
 ) -> tuple[dict[str, object], list[dict[str, object]]]:
     """Calculate observed coverage and missing regular-session intervals."""
     if dataframe.empty:
@@ -166,12 +172,12 @@ def audit_dataframe(
     )
     observed = timestamps.unique().sort_values()
     expected = expected_regular_timestamps(
-        observed.min(), observed.max(), calendar_name
+        observed.min(), observed.max(), calendar_name, bar_frequency
     )
     missing = expected.difference(observed)
     unexpected = observed.difference(expected)
     intervals = build_missing_intervals(
-        missing, expected, observed, symbol, calendar_name
+        missing, expected, observed, symbol, calendar_name, bar_frequency
     )
     covered_bars = len(expected.intersection(observed))
     coverage_pct = covered_bars / len(expected) * 100 if len(expected) else 0.0
@@ -212,12 +218,14 @@ def selected_sources(
     project_root: Path,
     data_type: str,
     storage_format: str,
+    dataset: str = "standard",
 ) -> list[tuple[str, str, Path]]:
     data_types = ("raw", "adjusted") if data_type == "all" else (data_type,)
     formats = ("csv", "parquet") if storage_format == "all" else (storage_format,)
+    root_name = "regular_sip_market_data" if dataset == "sip" else "regular_market_data"
     roots = {
-        "raw": project_root / "regular_market_data" / "raw",
-        "adjusted": project_root / "regular_market_data" / "adjusted",
+        "raw": project_root / root_name / "raw",
+        "adjusted": project_root / root_name / "adjusted",
     }
     return [
         (selected_type, selected_format, roots[selected_type] / selected_format)
@@ -230,17 +238,25 @@ def audit_source(
     source_dir: Path,
     storage_format: str,
     calendar_name: str,
+    bar_frequency: pd.Timedelta = BAR_FREQUENCY,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     input_files = sorted(source_dir.glob(f"*.{storage_format}"))
     summaries: list[dict[str, object]] = []
     intervals: list[dict[str, object]] = []
 
     for index, input_path in enumerate(input_files, 1):
-        symbol = input_path.name.split("_5min_historical", 1)[0]
+        symbol = input_path.name
+        for suffix in (
+            f"_1min_sip_historical.{storage_format}",
+            f"_5min_historical.{storage_format}",
+        ):
+            if symbol.endswith(suffix):
+                symbol = symbol[: -len(suffix)]
+                break
         try:
             dataframe = load_market_data(input_path, storage_format)
             summary, missing_intervals = audit_dataframe(
-                dataframe, symbol, calendar_name
+                dataframe, symbol, calendar_name, bar_frequency
             )
             summary["file"] = input_path.name
             summaries.append(summary)
@@ -268,7 +284,13 @@ def audit_source(
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="정규장 데이터의 종목별 기간과 누락된 5분봉 구간을 검사합니다."
+        description="정규장 데이터의 종목별 기간과 누락된 봉 구간을 검사합니다."
+    )
+    parser.add_argument(
+        "--dataset",
+        choices=("standard", "sip"),
+        default="standard",
+        help="검사할 데이터셋 (기본값: standard 5분봉)",
     )
     parser.add_argument(
         "--data-type",
@@ -289,8 +311,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--report-dir",
         type=Path,
-        default=PROJECT_ROOT / "report" / "regular_session_audit",
-        help="보고서 저장 폴더",
+        help="보고서 저장 폴더 (미지정 시 데이터셋별 기본 폴더)",
     )
     return parser.parse_args(argv)
 
@@ -299,7 +320,18 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     data_type = args.data_type or choose_data_type()
     storage_format = args.storage_format or choose_storage_format()
-    report_dir = args.report_dir.expanduser().resolve()
+    report_dir = (
+        args.report_dir.expanduser().resolve()
+        if args.report_dir
+        else PROJECT_ROOT
+        / "report"
+        / (
+            "regular_sip_session_audit"
+            if args.dataset == "sip"
+            else "regular_session_audit"
+        )
+    )
+    bar_frequency = pd.Timedelta(minutes=1 if args.dataset == "sip" else 5)
 
     try:
         mcal.get_calendar(args.calendar)
@@ -309,14 +341,14 @@ def main(argv: list[str] | None = None) -> int:
 
     processed_files = 0
     for selected_type, selected_format, source_dir in selected_sources(
-        PROJECT_ROOT, data_type, storage_format
+        PROJECT_ROOT, data_type, storage_format, args.dataset
     ):
         if not source_dir.is_dir():
             print(f"[건너뜀] 입력 폴더 없음: {source_dir}")
             continue
 
         summary, intervals = audit_source(
-            source_dir, selected_format, args.calendar
+            source_dir, selected_format, args.calendar, bar_frequency
         )
         if summary.empty:
             print(f"[건너뜀] 입력 파일 없음: {source_dir}")

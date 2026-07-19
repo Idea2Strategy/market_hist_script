@@ -4,6 +4,8 @@
 
 `quality_control.py`는 `daily_pipeline.py`에서 사용하는 자동 품질 검사 모듈입니다. 기본 일일 실행에서는 수집한 SIP 1분봉의 중복, OHLC 관계와 음수 거래량만 빠르게 검사하며 누락 API 재요청은 하지 않습니다. `daily_pipeline.py --deep-quality`를 지정하면 전체 정규장 누락을 분석하고 최근 10거래일의 누락 구간만 Alpaca에 재요청합니다. 복구되지 않은 누락은 실제 무거래일 수 있으므로 원본을 보간하지 않습니다.
 
+`daily_pipeline.py`가 만드는 요약 보고서는 `report/latest/{format}/`과 `report/history/{미국 거래일}/{format}/`에 함께 저장됩니다. 아래 `audit_regular_session.py`를 직접 실행할 때는 기존의 `regular_*_audit/` 경로를 사용합니다.
+
 ## 스크립트
 
 ### `check_data.py`

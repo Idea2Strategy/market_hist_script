@@ -24,9 +24,14 @@ class DailyPipelineTests(unittest.TestCase):
     def test_only_interactive_choice_selects_parquet(self, _mock_input):
         self.assertEqual(choose_storage_format(), "parquet")
 
-    def test_cli_only_exposes_storage_format(self):
+    def test_cli_defaults_to_fast_quality(self):
         args = parse_args(["--format", "csv"])
         self.assertEqual(args.storage_format, "csv")
+        self.assertFalse(args.deep_quality)
+
+    def test_cli_can_enable_deep_quality(self):
+        args = parse_args(["--format", "parquet", "--deep-quality"])
+        self.assertTrue(args.deep_quality)
 
     def test_early_close_is_used_only_after_data_delay(self):
         before_delay = datetime(2025, 7, 3, 17, 14, tzinfo=timezone.utc)
@@ -139,6 +144,7 @@ class DailyPipelineTests(unittest.TestCase):
             window[1],
             refresh_start,
             changes,
+            False,
         )
         mock_filter.assert_called_once_with(
             "parquet",
@@ -158,7 +164,7 @@ class DailyPipelineTests(unittest.TestCase):
             window[1],
             changes,
         )
-        mock_audit.assert_called_once_with("parquet")
+        mock_audit.assert_called_once_with("parquet", detailed=False)
         mock_failure_report.assert_called_once_with(
             [], "parquet", pd.Timestamp(window[1]).isoformat()
         )

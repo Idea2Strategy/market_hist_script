@@ -36,7 +36,11 @@ from data_filtering.resample_sip_5min import (
     output_file_name,
     process_resample_file_incrementally,
 )
-from data_validation.audit_regular_session import audit_source, save_report
+from data_validation.audit_regular_session import (
+    MISSING_INTERVAL_COLUMNS,
+    audit_source,
+    save_report,
+)
 from data_validation.quality_control import QualityResult, repair_symbol_file
 from pipeline_state import PipelineStateStore
 
@@ -297,6 +301,7 @@ def run_quality_control(
     end_time: datetime,
     repair_start: datetime,
     changed_from_by_symbol: dict[str, pd.Timestamp],
+    deep_quality: bool = False,
 ) -> tuple[list[str], list[dict[str, object]], dict[str, pd.Timestamp], int]:
     """Audit source bars, retry recent gaps, and block structurally invalid symbols."""
     validated_symbols: list[str] = []
@@ -306,6 +311,7 @@ def run_quality_control(
     missing_intervals: list[dict[str, object]] = []
     invalid_rows: list[dict[str, object]] = []
     repaired_rows = 0
+    quality_stage = "quality_deep" if deep_quality else "quality_fast"
 
     for index, symbol in enumerate(symbols, 1):
         file_path = storage_path(
@@ -315,7 +321,7 @@ def run_quality_control(
         if not force_check and state.is_complete(
             storage_format,
             symbol,
-            "quality",
+            quality_stage,
             target_session_utc,
             file_path,
         ):
@@ -335,13 +341,14 @@ def run_quality_control(
             DEFAULT_CHUNK_DAYS,
             DEFAULT_REQUEST_DELAY_SECONDS,
             DEFAULT_CALENDAR,
+            deep_quality,
         )
         if not result.success:
             error = result.error or "quality control failed"
             state.mark_stage(
                 storage_format,
                 symbol,
-                "quality",
+                quality_stage,
                 "failed",
                 target_session_utc,
                 1,
@@ -366,12 +373,21 @@ def run_quality_control(
             )
 
         invalid_count = len(result.invalid_rows)
-        status = "failed" if invalid_count else "success"
-        error = f"invalid OHLCV rows: {invalid_count}" if invalid_count else ""
+        duplicate_count = int(result.summary.get("duplicate_timestamps", 0))
+        empty_source = int(result.summary.get("observed_rows", 0)) == 0
+        structural_errors: list[str] = []
+        if empty_source:
+            structural_errors.append("empty source")
+        if duplicate_count:
+            structural_errors.append(f"duplicate timestamps: {duplicate_count}")
+        if invalid_count:
+            structural_errors.append(f"invalid OHLCV rows: {invalid_count}")
+        status = "failed" if structural_errors else "success"
+        error = "; ".join(structural_errors)
         state.mark_stage(
             storage_format,
             symbol,
-            "quality",
+            quality_stage,
             status,
             target_session_utc,
             1,
@@ -380,9 +396,10 @@ def run_quality_control(
                 "missing_bars": int(result.summary.get("missing_bars", 0)),
                 "repair_windows": int(result.summary.get("repair_windows", 0)),
                 "repaired_rows": result.repaired_rows,
+                "quality_mode": "deep" if deep_quality else "fast",
             },
         )
-        if invalid_count:
+        if structural_errors:
             failures.append(
                 {"stage": "quality", "symbol": symbol, "attempts": 1, "error": error}
             )
@@ -395,7 +412,7 @@ def run_quality_control(
         QUALITY_REPORT_ROOT / f"{prefix}_summary.csv",
     )
     save_report(
-        pd.DataFrame(missing_intervals),
+        pd.DataFrame(missing_intervals, columns=MISSING_INTERVAL_COLUMNS),
         QUALITY_REPORT_ROOT / f"{prefix}_missing_intervals.csv",
     )
     save_report(
@@ -540,7 +557,10 @@ def run_resample(
     return completed_files, candidate_rows, five_minute_rows, failures
 
 
-def run_validation(storage_format: str) -> tuple[int, int]:
+def run_validation(
+    storage_format: str,
+    detailed: bool = False,
+) -> tuple[int, int]:
     total_files = 0
     total_errors = 0
     sources = (
@@ -554,6 +574,7 @@ def run_validation(storage_format: str) -> tuple[int, int]:
             storage_format,
             DEFAULT_CALENDAR,
             bar_frequency,
+            include_intervals=detailed,
         )
         if summary.empty:
             raise RuntimeError(f"검사할 SIP {label} 정규장 데이터 파일이 없습니다.")
@@ -570,7 +591,10 @@ def run_validation(storage_format: str) -> tuple[int, int]:
         total_files += len(summary)
         total_errors += error_count
         print(f"[{label}] 요약 보고서: {summary_path}")
-        print(f"[{label}] 누락 구간 보고서: {intervals_path}")
+        if detailed:
+            print(f"[{label}] 누락 구간 상세 보고서: {intervals_path}")
+        else:
+            print(f"[{label}] 누락 구간 상세 생성 생략 (빠른 모드)")
     return total_files, total_errors
 
 
@@ -600,7 +624,11 @@ def save_failure_report(
         temporary_path.unlink(missing_ok=True)
 
 
-def run_pipeline(storage_format: str, now: datetime | None = None) -> int:
+def run_pipeline(
+    storage_format: str,
+    now: datetime | None = None,
+    deep_quality: bool = False,
+) -> int:
     load_dotenv(PROJECT_ROOT / ".env")
     api_key = os.getenv("ALPACA_API_KEY")
     secret_key = os.getenv("ALPACA_SECRET_KEY")
@@ -629,6 +657,7 @@ def run_pipeline(storage_format: str, now: datetime | None = None) -> int:
     print(f"수집 기간   : {start_time.isoformat()} ~ {end_time.isoformat()}")
     print(f"마지막 세션 : {end_time.astimezone(timezone.utc).isoformat()}")
     print(f"대상 종목   : {len(symbols)}개")
+    print(f"품질 모드   : {'상세 검사·누락 복구' if deep_quality else '빠른 구조 검사'}")
     print("=" * 72)
 
     client = StockHistoricalDataClient(api_key, secret_key)
@@ -650,7 +679,14 @@ def run_pipeline(storage_format: str, now: datetime | None = None) -> int:
         symbol for symbol in symbols if symbol not in failed_collection_symbols
     ]
 
-    print("\n[2/5] 데이터 품질 검사 및 최근 누락 구간 복구")
+    print(
+        "\n[2/5] "
+        + (
+            "데이터 품질 상세 검사 및 최근 누락 구간 복구"
+            if deep_quality
+            else "빠른 데이터 구조 검사"
+        )
+    )
     (
         quality_symbols,
         quality_failures,
@@ -666,6 +702,7 @@ def run_pipeline(storage_format: str, now: datetime | None = None) -> int:
         end_time,
         refresh_start,
         changed_from_by_symbol,
+        deep_quality,
     )
     failures.extend(quality_failures)
 
@@ -711,8 +748,18 @@ def run_pipeline(storage_format: str, now: datetime | None = None) -> int:
         if resampled_files == 0:
             raise RuntimeError("5분봉으로 변환할 정규장 1분봉 파일이 없습니다.")
 
-        print("\n[5/5] SIP 1분봉·5분봉 기간 및 누락 구간 검사")
-        audited_files, audit_errors = run_validation(storage_format)
+        print(
+            "\n[5/5] "
+            + (
+                "SIP 1분봉·5분봉 기간 및 누락 구간 상세 검사"
+                if deep_quality
+                else "SIP 1분봉·5분봉 기간·커버리지 요약 검사"
+            )
+        )
+        audited_files, audit_errors = run_validation(
+            storage_format,
+            detailed=deep_quality,
+        )
     except (OSError, RuntimeError, ValueError, ImportError) as exc:
         failures.append(
             {"stage": "postprocess", "symbol": "*", "attempts": 1, "error": str(exc)}
@@ -743,9 +790,14 @@ def run_pipeline(storage_format: str, now: datetime | None = None) -> int:
         f"({one_minute_rows:,} -> {five_minute_rows:,}행), "
         f"검사 {audited_files}개 파일"
     )
+    quality_result_text = (
+        f"최근 누락 복구 {repaired_rows:,}행"
+        if deep_quality
+        else "누락 재요청 생략"
+    )
     print(
         f"품질 검사 통과 {len(quality_symbols)}/{len(collected_symbols)}개, "
-        f"최근 누락 복구 {repaired_rows:,}행"
+        f"{quality_result_text}"
     )
     if failures:
         print(f"최종 실패 {len(failures)}건: {FAILURE_REPORT_PATH}")
@@ -767,13 +819,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=("csv", "parquet"),
         help="저장 형식 (미지정 시 실행 중 선택)",
     )
+    parser.add_argument(
+        "--deep-quality",
+        action="store_true",
+        help=(
+            "전체 누락 구간 상세 보고서와 최근 10거래일 누락 재요청을 실행합니다. "
+            "기본값은 빠른 구조 검사입니다."
+        ),
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     storage_format = args.storage_format or choose_storage_format()
-    return run_pipeline(storage_format)
+    return run_pipeline(storage_format, deep_quality=args.deep_quality)
 
 
 if __name__ == "__main__":

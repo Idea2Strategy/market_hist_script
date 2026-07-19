@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 import time
@@ -39,9 +38,9 @@ from data_filtering.resample_sip_5min import (
 from data_validation.audit_regular_session import (
     MISSING_INTERVAL_COLUMNS,
     audit_source,
-    save_report,
 )
 from data_validation.quality_control import QualityResult, repair_symbol_file
+from pipeline_reporting import DailyReportStore, replace_report_rows
 from pipeline_state import PipelineStateStore
 
 
@@ -54,9 +53,6 @@ MIN_EXPECTED_TICKERS = 400
 TICKER_FILE = PROJECT_ROOT / "ticker_info" / "sp500_tickers_3years.txt"
 COLLECTION_ROOT = PROJECT_ROOT / "sip_market_data"
 FILTERED_ROOT = PROJECT_ROOT / "regular_sip_market_data"
-REPORT_ROOT = PROJECT_ROOT / "report" / "regular_sip_session_audit"
-FAILURE_REPORT_PATH = PROJECT_ROOT / "report" / "pipeline_failures.json"
-QUALITY_REPORT_ROOT = PROJECT_ROOT / "report" / "data_quality"
 MAX_SYMBOL_ATTEMPTS = 3
 SYMBOL_RETRY_DELAY_SECONDS = 5
 ADJUSTED_REFRESH_SESSIONS = 10
@@ -302,8 +298,29 @@ def run_quality_control(
     repair_start: datetime,
     changed_from_by_symbol: dict[str, pd.Timestamp],
     deep_quality: bool = False,
+    reports: DailyReportStore | None = None,
 ) -> tuple[list[str], list[dict[str, object]], dict[str, pd.Timestamp], int]:
     """Audit source bars, retry recent gaps, and block structurally invalid symbols."""
+    reports = reports or DailyReportStore.for_target_session(
+        target_session_utc,
+        storage_format,
+        DEFAULT_CALENDAR,
+    )
+    previous_summaries = reports.load_history_dataframe("quality_summary.csv")
+    previous_invalid_rows = reports.load_history_dataframe(
+        "quality_invalid_rows.csv"
+    )
+    previous_missing_intervals = (
+        reports.load_history_dataframe(
+            "quality_missing_intervals.csv",
+            detailed=True,
+        )
+        if deep_quality
+        else pd.DataFrame()
+    )
+    has_prior_summary = (
+        reports.history_root / "quality_summary.csv"
+    ).is_file()
     validated_symbols: list[str] = []
     failures: list[dict[str, object]] = []
     downstream_changes = dict(changed_from_by_symbol)
@@ -312,13 +329,14 @@ def run_quality_control(
     invalid_rows: list[dict[str, object]] = []
     repaired_rows = 0
     quality_stage = "quality_deep" if deep_quality else "quality_fast"
+    checked_symbols: set[str] = set()
 
     for index, symbol in enumerate(symbols, 1):
         file_path = storage_path(
             symbol, DATA_TYPE, storage_format, COLLECTION_ROOT
         )
         force_check = symbol in changed_from_by_symbol
-        if not force_check and state.is_complete(
+        if has_prior_summary and not force_check and state.is_complete(
             storage_format,
             symbol,
             quality_stage,
@@ -329,6 +347,7 @@ def run_quality_control(
             validated_symbols.append(symbol)
             continue
 
+        checked_symbols.add(symbol)
         result: QualityResult = repair_symbol_file(
             client,
             symbol,
@@ -406,19 +425,32 @@ def run_quality_control(
         else:
             validated_symbols.append(symbol)
 
-    prefix = f"{DATA_TYPE}_{storage_format}"
-    save_report(
+    summary_report = replace_report_rows(
+        previous_summaries,
         pd.DataFrame(summaries),
-        QUALITY_REPORT_ROOT / f"{prefix}_summary.csv",
+        "symbol",
+        checked_symbols,
     )
-    save_report(
-        pd.DataFrame(missing_intervals, columns=MISSING_INTERVAL_COLUMNS),
-        QUALITY_REPORT_ROOT / f"{prefix}_missing_intervals.csv",
-    )
-    save_report(
+    invalid_report = replace_report_rows(
+        previous_invalid_rows,
         pd.DataFrame(invalid_rows),
-        QUALITY_REPORT_ROOT / f"{prefix}_invalid_rows.csv",
+        "symbol",
+        checked_symbols,
     )
+    reports.save_dataframe(summary_report, "quality_summary.csv")
+    reports.save_dataframe(invalid_report, "quality_invalid_rows.csv")
+    if deep_quality:
+        missing_report = replace_report_rows(
+            previous_missing_intervals,
+            pd.DataFrame(missing_intervals, columns=MISSING_INTERVAL_COLUMNS),
+            "symbol",
+            checked_symbols,
+        )
+        reports.save_dataframe(
+            missing_report,
+            "quality_missing_intervals.csv",
+            detailed=True,
+        )
     return validated_symbols, failures, downstream_changes, repaired_rows
 
 
@@ -560,7 +592,17 @@ def run_resample(
 def run_validation(
     storage_format: str,
     detailed: bool = False,
+    reports: DailyReportStore | None = None,
+    target_session_utc: str | None = None,
 ) -> tuple[int, int]:
+    if reports is None:
+        if target_session_utc is None:
+            raise ValueError("target_session_utc is required without a report store")
+        reports = DailyReportStore.for_target_session(
+            target_session_utc,
+            storage_format,
+            DEFAULT_CALENDAR,
+        )
     total_files = 0
     total_errors = 0
     sources = (
@@ -579,12 +621,17 @@ def run_validation(
         if summary.empty:
             raise RuntimeError(f"검사할 SIP {label} 정규장 데이터 파일이 없습니다.")
 
-        prefix = f"{DATA_TYPE}_{storage_format}"
-        report_dir = REPORT_ROOT / label
-        summary_path = report_dir / f"{prefix}_summary.csv"
-        intervals_path = report_dir / f"{prefix}_missing_intervals.csv"
-        save_report(summary, summary_path)
-        save_report(intervals, intervals_path)
+        summary_path, _ = reports.save_dataframe(
+            summary,
+            f"{label}_summary.csv",
+        )
+        intervals_path = reports.latest_root / "deep_quality" / f"{label}_missing_intervals.csv"
+        if detailed:
+            intervals_path, _ = reports.save_dataframe(
+                intervals,
+                f"{label}_missing_intervals.csv",
+                detailed=True,
+            )
         error_count = int(
             summary["status"].astype(str).str.startswith("error:").sum()
         )
@@ -602,26 +649,43 @@ def save_failure_report(
     failures: list[dict[str, object]],
     storage_format: str,
     target_session_utc: str,
-) -> None:
-    """Atomically write the latest failed-symbol report for server monitoring."""
-    FAILURE_REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path = FAILURE_REPORT_PATH.with_name(
-        f".{FAILURE_REPORT_PATH.name}.tmp"
-    )
+    reports: DailyReportStore,
+) -> Path:
+    """Write current and session-dated failed-symbol reports."""
     payload = {
         "storage_format": storage_format,
         "target_session_utc": target_session_utc,
+        "session_date": reports.session_date,
         "failure_count": len(failures),
         "failures": failures,
     }
-    try:
-        temporary_path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        os.replace(temporary_path, FAILURE_REPORT_PATH)
-    finally:
-        temporary_path.unlink(missing_ok=True)
+    latest_path, _ = reports.save_json(payload, "pipeline_failures.json")
+    return latest_path
+
+
+def save_run_summary(
+    reports: DailyReportStore,
+    *,
+    status: str,
+    storage_format: str,
+    target_session_utc: str,
+    started_at_utc: str,
+    failures: list[dict[str, object]],
+    metrics: dict[str, object],
+) -> Path:
+    """Write a compact operational summary for the current session."""
+    payload = {
+        "status": status,
+        "storage_format": storage_format,
+        "target_session_utc": target_session_utc,
+        "session_date": reports.session_date,
+        "started_at_utc": started_at_utc,
+        "finished_at_utc": datetime.now(timezone.utc).isoformat(),
+        **metrics,
+        "failure_count": len(failures),
+    }
+    latest_path, _ = reports.save_json(payload, "run_summary.json")
+    return latest_path
 
 
 def run_pipeline(
@@ -647,6 +711,17 @@ def run_pipeline(
         return 1
 
     target_session_utc = pd.Timestamp(end_time).isoformat()
+    started_at_utc = datetime.now(timezone.utc).isoformat()
+    try:
+        reports = DailyReportStore.for_target_session(
+            target_session_utc,
+            storage_format,
+            DEFAULT_CALENDAR,
+        )
+        reports.prune_history()
+    except (OSError, ValueError) as exc:
+        print(f"[오류] 보고서 저장소 준비 실패: {exc}", file=sys.stderr)
+        return 1
     state.begin_run(storage_format, target_session_utc)
 
     print("=" * 72)
@@ -703,9 +778,18 @@ def run_pipeline(
         refresh_start,
         changed_from_by_symbol,
         deep_quality,
+        reports,
     )
     failures.extend(quality_failures)
 
+    processed_files = 0
+    total_rows = 0
+    kept_rows = 0
+    resampled_files = 0
+    one_minute_rows = 0
+    five_minute_rows = 0
+    audited_files = 0
+    audit_errors = 0
     print("\n[3/5] XNYS 정규장 1분봉 필터링")
     try:
         processed_files, total_rows, kept_rows, filter_failures = run_filter(
@@ -759,12 +843,37 @@ def run_pipeline(
         audited_files, audit_errors = run_validation(
             storage_format,
             detailed=deep_quality,
+            reports=reports,
         )
     except (OSError, RuntimeError, ValueError, ImportError) as exc:
         failures.append(
             {"stage": "postprocess", "symbol": "*", "attempts": 1, "error": str(exc)}
         )
-        save_failure_report(failures, storage_format, target_session_utc)
+        save_failure_report(
+            failures,
+            storage_format,
+            target_session_utc,
+            reports,
+        )
+        save_run_summary(
+            reports,
+            status="failed",
+            storage_format=storage_format,
+            target_session_utc=target_session_utc,
+            started_at_utc=started_at_utc,
+            failures=failures,
+            metrics={
+                "quality_mode": "deep" if deep_quality else "fast",
+                "symbols_total": len(symbols),
+                "collection_success_symbols": len(collected_symbols),
+                "quality_success_symbols": len(quality_symbols),
+                "repaired_rows": repaired_rows,
+                "filtered_files": processed_files,
+                "resampled_files": resampled_files,
+                "audited_files": audited_files,
+                "audit_errors": audit_errors,
+            },
+        )
         state.finish_run("failed", failures)
         print(f"[오류] 후처리 실패: {exc}", file=sys.stderr)
         return 1
@@ -779,8 +888,37 @@ def run_pipeline(
                 "error": f"검사 오류 파일 {audit_errors}개",
             }
         )
-    save_failure_report(failures, storage_format, target_session_utc)
-    state.finish_run("failed" if failures else "success", failures)
+    final_status = "failed" if failures else "success"
+    failure_report_path = save_failure_report(
+        failures,
+        storage_format,
+        target_session_utc,
+        reports,
+    )
+    run_summary_path = save_run_summary(
+        reports,
+        status=final_status,
+        storage_format=storage_format,
+        target_session_utc=target_session_utc,
+        started_at_utc=started_at_utc,
+        failures=failures,
+        metrics={
+            "quality_mode": "deep" if deep_quality else "fast",
+            "symbols_total": len(symbols),
+            "collection_success_symbols": len(collected_symbols),
+            "quality_success_symbols": len(quality_symbols),
+            "repaired_rows": repaired_rows,
+            "filtered_files": processed_files,
+            "filtered_source_rows": total_rows,
+            "regular_session_rows": kept_rows,
+            "resampled_files": resampled_files,
+            "resampled_source_rows": one_minute_rows,
+            "five_minute_rows": five_minute_rows,
+            "audited_files": audited_files,
+            "audit_errors": audit_errors,
+        },
+    )
+    state.finish_run(final_status, failures)
 
     print("=" * 72)
     print(
@@ -800,9 +938,11 @@ def run_pipeline(
         f"{quality_result_text}"
     )
     if failures:
-        print(f"최종 실패 {len(failures)}건: {FAILURE_REPORT_PATH}")
+        print(f"최종 실패 {len(failures)}건: {failure_report_path}")
     if audit_errors:
         print(f"검사 오류 파일: {audit_errors}개")
+    print(f"실행 요약: {run_summary_path}")
+    print(f"거래일별 보고서: {reports.history_root}")
     return 1 if failures else 0
 
 

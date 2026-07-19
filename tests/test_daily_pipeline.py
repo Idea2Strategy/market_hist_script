@@ -101,6 +101,7 @@ class DailyPipelineTests(unittest.TestCase):
             patch("daily_pipeline.adjusted_refresh_start", return_value=refresh_start),
             patch("daily_pipeline.load_pipeline_symbols", return_value=["AAPL"]),
             patch("daily_pipeline.PipelineStateStore") as mock_state_class,
+            patch("daily_pipeline.DailyReportStore") as mock_report_store_class,
             patch("daily_pipeline.StockHistoricalDataClient") as mock_client,
             patch(
                 "daily_pipeline.run_collection", return_value=([], changes)
@@ -119,11 +120,14 @@ class DailyPipelineTests(unittest.TestCase):
             ) as mock_resample,
             patch("daily_pipeline.run_validation", return_value=(1, 0)) as mock_audit,
             patch("daily_pipeline.save_failure_report") as mock_failure_report,
+            patch("daily_pipeline.save_run_summary") as mock_run_summary,
         ):
             result = run_pipeline("parquet")
 
         self.assertEqual(result, 0)
         state = mock_state_class.return_value
+        reports = mock_report_store_class.for_target_session.return_value
+        reports.prune_history.assert_called_once_with()
         mock_collect.assert_called_once_with(
             mock_client.return_value,
             ["AAPL"],
@@ -145,6 +149,7 @@ class DailyPipelineTests(unittest.TestCase):
             refresh_start,
             changes,
             False,
+            reports,
         )
         mock_filter.assert_called_once_with(
             "parquet",
@@ -164,10 +169,18 @@ class DailyPipelineTests(unittest.TestCase):
             window[1],
             changes,
         )
-        mock_audit.assert_called_once_with("parquet", detailed=False)
-        mock_failure_report.assert_called_once_with(
-            [], "parquet", pd.Timestamp(window[1]).isoformat()
+        mock_audit.assert_called_once_with(
+            "parquet",
+            detailed=False,
+            reports=reports,
         )
+        mock_failure_report.assert_called_once_with(
+            [],
+            "parquet",
+            pd.Timestamp(window[1]).isoformat(),
+            reports,
+        )
+        mock_run_summary.assert_called_once()
         state.finish_run.assert_called_once_with("success", [])
 
     @patch(

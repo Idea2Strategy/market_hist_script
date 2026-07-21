@@ -116,6 +116,7 @@ market_hist_script/
 | `regular_sip_5min_market_data/` | `data_filtering/resample_sip_5min.py` | Raw·Adjusted 정규장 SIP 1분봉에서 각각 집계한 5분봉 |
 | `regular_sip_{15min,1hour,4hour,1day}_market_data/` | `data_filtering/resample_sip_5min.py` | 같은 정규장 1분봉에서 집계한 Raw·Adjusted 추가 주기 봉 |
 | `pipeline_state/daily_pipeline_state.json` | `daily_pipeline.py` | 종목·가격 타입·봉 주기별 체크포인트와 최근 실행 상태 |
+| `pipeline_state/inactive_symbols.json` | `daily_pipeline.py`, `data_collection/collect_sip_1min.py` | Alpaca에서 확인된 비활성·상장폐지 종목 캐시 |
 | `report/latest/{format}/` | `daily_pipeline.py` | 마지막 실행의 요약, 실패 목록과 품질 검사 결과 |
 | `report/history/{session}/{format}/` | `daily_pipeline.py` | 미국 거래일별로 보관하는 일일 실행 보고서 |
 | `report/data_audit_report.txt` | `data_validation/data_report.py` | Raw Parquet 전체 검사 보고서 |
@@ -221,6 +222,8 @@ Windows에서 백신이나 검색 인덱서가 상태 파일을 순간적으로 
 `daily_pipeline_state.json`은 실행 이력이 아니라 재시작을 위한 현재 체크포인트이므로 날짜별로 복제하지 않고 하나만 유지합니다. 날짜별 실행 이력은 `report/history/`가 담당합니다.
 
 티커 크롤링이 일시적으로 실패하면 정상적인 기존 티커 파일을 유지합니다. 수집 실패 종목은 전체 1차 수집이 끝난 뒤 실패 종목만 최대 3회까지 자동 재시도합니다. 최종 실패는 최신·거래일별 `pipeline_failures.json`과 체크포인트에 기록합니다. 수집 실패 종목이나 검사 오류가 있으면 가능한 파일의 후속 처리는 계속 수행하지만 프로세스는 종료 코드 `1`을 반환하므로 서버 모니터링에서 실패를 감지할 수 있습니다.
+
+마지막 저장 봉이 현재 수집 종료 시점보다 30일 이상 오래된 종목은 Alpaca 자산 상태를 추가로 확인합니다. 상태가 `inactive`로 확인된 경우에만 이후의 빈 기간 요청을 생략하고 `pipeline_state/inactive_symbols.json`에 30일 동안 기록합니다. 캐시가 만료되면 상태를 다시 확인하며, 상태 API 오류 또는 `active` 응답에서는 안전하게 기존 수집을 계속합니다.
 
 ## 개별 스크립트 실행 순서
 

@@ -45,7 +45,8 @@ from pipeline_state import PipelineStateStore
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-DATA_TYPE = "adjusted"
+DATA_TYPES = ("adjusted", "raw")
+DEFAULT_DATA_TYPE = "adjusted"
 DATASET = "sip"
 ONE_MINUTE_FREQUENCY = pd.Timedelta(minutes=1)
 FIVE_MINUTE_FREQUENCY = pd.Timedelta(minutes=5)
@@ -56,6 +57,16 @@ FILTERED_ROOT = PROJECT_ROOT / "regular_sip_1min_market_data"
 MAX_SYMBOL_ATTEMPTS = 3
 SYMBOL_RETRY_DELAY_SECONDS = 5
 ADJUSTED_REFRESH_SESSIONS = 10
+
+
+def stage_name(stage: str, data_type: str) -> str:
+    """Keep existing adjusted checkpoints and isolate raw checkpoints."""
+    return stage if data_type == DEFAULT_DATA_TYPE else f"{data_type}_{stage}"
+
+
+def report_name(filename: str, data_type: str) -> str:
+    """Keep existing adjusted report names and prefix the added raw reports."""
+    return filename if data_type == DEFAULT_DATA_TYPE else f"{data_type}_{filename}"
 
 
 def choose_storage_format() -> str:
@@ -196,8 +207,9 @@ def run_collection(
     end_time: datetime,
     state: PipelineStateStore,
     target_session_utc: str,
-    refresh_start: datetime,
+    refresh_start: datetime | None,
     retry_delay: float = SYMBOL_RETRY_DELAY_SECONDS,
+    data_type: str = DEFAULT_DATA_TYPE,
 ) -> tuple[list[dict[str, object]], dict[str, pd.Timestamp]]:
     pending = list(symbols)
     last_attempts: dict[str, int] = {}
@@ -214,14 +226,14 @@ def run_collection(
         for index, symbol in enumerate(pending, 1):
             file_path = storage_path(
                 symbol,
-                DATA_TYPE,
+                data_type,
                 storage_format,
                 COLLECTION_ROOT,
             )
             if state.is_complete(
                 storage_format,
                 symbol,
-                "collection",
+                stage_name("collection", data_type),
                 target_session_utc,
                 file_path,
             ):
@@ -235,7 +247,7 @@ def run_collection(
                 result = update_symbol_data(
                     client,
                     symbol,
-                    DATA_TYPE,
+                    data_type,
                     storage_format,
                     COLLECTION_ROOT,
                     start_time,
@@ -256,7 +268,7 @@ def run_collection(
             state.mark_stage(
                 storage_format,
                 symbol,
-                "collection",
+                stage_name("collection", data_type),
                 "success" if succeeded else "failed",
                 target_session_utc,
                 attempt,
@@ -278,6 +290,7 @@ def run_collection(
     failures = [
         {
             "stage": "collection",
+            "data_type": data_type,
             "symbol": symbol,
             "attempts": last_attempts.get(symbol, MAX_SYMBOL_ATTEMPTS),
             "error": "자동 재시도 후에도 수집 실패",
@@ -299,6 +312,7 @@ def run_quality_control(
     changed_from_by_symbol: dict[str, pd.Timestamp],
     deep_quality: bool = False,
     reports: DailyReportStore | None = None,
+    data_type: str = DEFAULT_DATA_TYPE,
 ) -> tuple[list[str], list[dict[str, object]], dict[str, pd.Timestamp], int]:
     """Audit source bars, retry recent gaps, and block structurally invalid symbols."""
     reports = reports or DailyReportStore.for_target_session(
@@ -306,20 +320,23 @@ def run_quality_control(
         storage_format,
         DEFAULT_CALENDAR,
     )
-    previous_summaries = reports.load_history_dataframe("quality_summary.csv")
+    summary_filename = report_name("quality_summary.csv", data_type)
+    invalid_filename = report_name("quality_invalid_rows.csv", data_type)
+    missing_filename = report_name("quality_missing_intervals.csv", data_type)
+    previous_summaries = reports.load_history_dataframe(summary_filename)
     previous_invalid_rows = reports.load_history_dataframe(
-        "quality_invalid_rows.csv"
+        invalid_filename
     )
     previous_missing_intervals = (
         reports.load_history_dataframe(
-            "quality_missing_intervals.csv",
+            missing_filename,
             detailed=True,
         )
         if deep_quality
         else pd.DataFrame()
     )
     has_prior_summary = (
-        reports.history_root / "quality_summary.csv"
+        reports.history_root / summary_filename
     ).is_file()
     validated_symbols: list[str] = []
     failures: list[dict[str, object]] = []
@@ -332,14 +349,12 @@ def run_quality_control(
     checked_symbols: set[str] = set()
 
     for index, symbol in enumerate(symbols, 1):
-        file_path = storage_path(
-            symbol, DATA_TYPE, storage_format, COLLECTION_ROOT
-        )
+        file_path = storage_path(symbol, data_type, storage_format, COLLECTION_ROOT)
         force_check = symbol in changed_from_by_symbol
         if has_prior_summary and not force_check and state.is_complete(
             storage_format,
             symbol,
-            quality_stage,
+            stage_name(quality_stage, data_type),
             target_session_utc,
             file_path,
         ):
@@ -353,7 +368,7 @@ def run_quality_control(
             symbol,
             file_path,
             storage_format,
-            DATA_TYPE,
+            data_type,
             start_time,
             end_time,
             repair_start,
@@ -367,14 +382,20 @@ def run_quality_control(
             state.mark_stage(
                 storage_format,
                 symbol,
-                quality_stage,
+                stage_name(quality_stage, data_type),
                 "failed",
                 target_session_utc,
                 1,
                 error,
             )
             failures.append(
-                {"stage": "quality", "symbol": symbol, "attempts": 1, "error": error}
+                {
+                    "stage": "quality",
+                    "data_type": data_type,
+                    "symbol": symbol,
+                    "attempts": 1,
+                    "error": error,
+                }
             )
             summaries.append({"symbol": symbol, "status": f"error: {error}"})
             continue
@@ -406,7 +427,7 @@ def run_quality_control(
         state.mark_stage(
             storage_format,
             symbol,
-            quality_stage,
+            stage_name(quality_stage, data_type),
             status,
             target_session_utc,
             1,
@@ -420,7 +441,13 @@ def run_quality_control(
         )
         if structural_errors:
             failures.append(
-                {"stage": "quality", "symbol": symbol, "attempts": 1, "error": error}
+                {
+                    "stage": "quality",
+                    "data_type": data_type,
+                    "symbol": symbol,
+                    "attempts": 1,
+                    "error": error,
+                }
             )
         else:
             validated_symbols.append(symbol)
@@ -437,8 +464,8 @@ def run_quality_control(
         "symbol",
         checked_symbols,
     )
-    reports.save_dataframe(summary_report, "quality_summary.csv")
-    reports.save_dataframe(invalid_report, "quality_invalid_rows.csv")
+    reports.save_dataframe(summary_report, summary_filename)
+    reports.save_dataframe(invalid_report, invalid_filename)
     if deep_quality:
         missing_report = replace_report_rows(
             previous_missing_intervals,
@@ -448,7 +475,7 @@ def run_quality_control(
         )
         reports.save_dataframe(
             missing_report,
-            "quality_missing_intervals.csv",
+            missing_filename,
             detailed=True,
         )
     return validated_symbols, failures, downstream_changes, repaired_rows
@@ -462,12 +489,13 @@ def run_filter(
     start_time: datetime,
     end_time: datetime,
     changed_from_by_symbol: dict[str, pd.Timestamp] | None = None,
+    data_type: str = DEFAULT_DATA_TYPE,
 ) -> tuple[int, int, int, list[dict[str, object]]]:
     changed_from_by_symbol = changed_from_by_symbol or {}
     source = build_sources(
         PROJECT_ROOT,
         FILTERED_ROOT,
-        DATA_TYPE,
+        data_type,
         storage_format,
         DATASET,
     )[0]
@@ -477,13 +505,13 @@ def run_filter(
     failures: list[dict[str, object]] = []
     for index, symbol in enumerate(symbols, 1):
         input_path = storage_path(
-            symbol, DATA_TYPE, storage_format, COLLECTION_ROOT
+            symbol, data_type, storage_format, COLLECTION_ROOT
         )
         output_path = source.destination_dir / input_path.name
         if symbol not in changed_from_by_symbol and state.is_complete(
             storage_format,
             symbol,
-            "filter",
+            stage_name("filter", data_type),
             target_session_utc,
             output_path,
         ):
@@ -503,7 +531,7 @@ def run_filter(
             state.mark_stage(
                 storage_format,
                 symbol,
-                "filter",
+                stage_name("filter", data_type),
                 "success",
                 target_session_utc,
                 1,
@@ -515,9 +543,23 @@ def run_filter(
             print(f"[{index}/{len(symbols)}] {symbol}: 증분 {processed:,} -> 정규장 {kept:,}행")
         except (OSError, ValueError, ImportError) as exc:
             state.mark_stage(
-                storage_format, symbol, "filter", "failed", target_session_utc, 1, str(exc)
+                storage_format,
+                symbol,
+                stage_name("filter", data_type),
+                "failed",
+                target_session_utc,
+                1,
+                str(exc),
             )
-            failures.append({"stage": "filter", "symbol": symbol, "attempts": 1, "error": str(exc)})
+            failures.append(
+                {
+                    "stage": "filter",
+                    "data_type": data_type,
+                    "symbol": symbol,
+                    "attempts": 1,
+                    "error": str(exc),
+                }
+            )
     return completed_files, candidate_rows, filtered_rows, failures
 
 
@@ -529,9 +571,15 @@ def run_resample(
     start_time: datetime,
     end_time: datetime,
     changed_from_by_symbol: dict[str, pd.Timestamp] | None = None,
+    data_type: str = DEFAULT_DATA_TYPE,
 ) -> tuple[int, int, int, list[dict[str, object]]]:
     changed_from_by_symbol = changed_from_by_symbol or {}
-    source = build_resample_source(storage_format)
+    source = build_resample_source(
+        storage_format,
+        source_root=FILTERED_ROOT,
+        destination_root=RESAMPLED_ROOT,
+        data_type=data_type,
+    )
     completed_files = 0
     candidate_rows = 0
     five_minute_rows = 0
@@ -543,7 +591,7 @@ def run_resample(
         if symbol not in changed_from_by_symbol and state.is_complete(
             storage_format,
             symbol,
-            "resample_5min",
+            stage_name("resample_5min", data_type),
             target_session_utc,
             output_path,
         ):
@@ -563,7 +611,7 @@ def run_resample(
             state.mark_stage(
                 storage_format,
                 symbol,
-                "resample_5min",
+                stage_name("resample_5min", data_type),
                 "success",
                 target_session_utc,
                 1,
@@ -577,14 +625,20 @@ def run_resample(
             state.mark_stage(
                 storage_format,
                 symbol,
-                "resample_5min",
+                stage_name("resample_5min", data_type),
                 "failed",
                 target_session_utc,
                 1,
                 str(exc),
             )
             failures.append(
-                {"stage": "resample_5min", "symbol": symbol, "attempts": 1, "error": str(exc)}
+                {
+                    "stage": "resample_5min",
+                    "data_type": data_type,
+                    "symbol": symbol,
+                    "attempts": 1,
+                    "error": str(exc),
+                }
             )
     return completed_files, candidate_rows, five_minute_rows, failures
 
@@ -594,6 +648,7 @@ def run_validation(
     detailed: bool = False,
     reports: DailyReportStore | None = None,
     target_session_utc: str | None = None,
+    data_type: str = DEFAULT_DATA_TYPE,
 ) -> tuple[int, int]:
     if reports is None:
         if target_session_utc is None:
@@ -610,7 +665,7 @@ def run_validation(
         ("5min", RESAMPLED_ROOT, FIVE_MINUTE_FREQUENCY),
     )
     for label, source_root, bar_frequency in sources:
-        source_dir = source_root / DATA_TYPE / storage_format
+        source_dir = source_root / data_type / storage_format
         summary, intervals = audit_source(
             source_dir,
             storage_format,
@@ -623,13 +678,17 @@ def run_validation(
 
         summary_path, _ = reports.save_dataframe(
             summary,
-            f"{label}_summary.csv",
+            report_name(f"{label}_summary.csv", data_type),
         )
-        intervals_path = reports.latest_root / "deep_quality" / f"{label}_missing_intervals.csv"
+        intervals_path = (
+            reports.latest_root
+            / "deep_quality"
+            / report_name(f"{label}_missing_intervals.csv", data_type)
+        )
         if detailed:
             intervals_path, _ = reports.save_dataframe(
                 intervals,
-                f"{label}_missing_intervals.csv",
+                report_name(f"{label}_missing_intervals.csv", data_type),
                 detailed=True,
             )
         error_count = int(
@@ -727,7 +786,7 @@ def run_pipeline(
     print("=" * 72)
     print("일일 통합 파이프라인")
     print("피드/간격   : SIP / 1분")
-    print("가격 조정   : Adjusted")
+    print("가격 타입   : Adjusted + Raw")
     print(f"저장 형식   : {storage_format}")
     print(f"수집 기간   : {start_time.isoformat()} ~ {end_time.isoformat()}")
     print(f"마지막 세션 : {end_time.astimezone(timezone.utc).isoformat()}")
@@ -736,158 +795,201 @@ def run_pipeline(
     print("=" * 72)
 
     client = StockHistoricalDataClient(api_key, secret_key)
-    print("\n[1/5] SIP Adjusted 1분봉 수집·수정주가 갱신")
-    failures, changed_from_by_symbol = run_collection(
-        client,
-        symbols,
-        storage_format,
-        start_time,
-        end_time,
-        state,
-        target_session_utc,
-        refresh_start,
-    )
-    failed_collection_symbols = {
-        str(failure["symbol"]) for failure in failures
+    failures: list[dict[str, object]] = []
+    changed_by_type: dict[str, dict[str, pd.Timestamp]] = {}
+    collected_by_type: dict[str, list[str]] = {}
+    quality_by_type: dict[str, list[str]] = {}
+    filtered_by_type: dict[str, list[str]] = {}
+    metrics_by_type: dict[str, dict[str, int]] = {
+        data_type: {
+            "collection_success_symbols": 0,
+            "quality_success_symbols": 0,
+            "repaired_rows": 0,
+            "filtered_files": 0,
+            "filtered_source_rows": 0,
+            "regular_session_rows": 0,
+            "resampled_files": 0,
+            "resampled_source_rows": 0,
+            "five_minute_rows": 0,
+            "audited_files": 0,
+            "audit_errors": 0,
+        }
+        for data_type in DATA_TYPES
     }
-    collected_symbols = [
-        symbol for symbol in symbols if symbol not in failed_collection_symbols
-    ]
+
+    print("\n[1/5] SIP Adjusted·Raw 1분봉 수집")
+    for data_type in DATA_TYPES:
+        print(f"\n--- {data_type.upper()} 수집 ---")
+        collection_failures, changes = run_collection(
+            client,
+            symbols,
+            storage_format,
+            start_time,
+            end_time,
+            state,
+            target_session_utc,
+            refresh_start if data_type == "adjusted" else None,
+            data_type=data_type,
+        )
+        failures.extend(collection_failures)
+        failed_symbols = {
+            str(failure["symbol"]) for failure in collection_failures
+        }
+        collected = [symbol for symbol in symbols if symbol not in failed_symbols]
+        collected_by_type[data_type] = collected
+        changed_by_type[data_type] = changes
+        metrics_by_type[data_type]["collection_success_symbols"] = len(collected)
 
     print(
         "\n[2/5] "
         + (
-            "데이터 품질 상세 검사 및 최근 누락 구간 복구"
+            "Adjusted·Raw 데이터 품질 상세 검사 및 최근 누락 구간 복구"
             if deep_quality
-            else "빠른 데이터 구조 검사"
+            else "Adjusted·Raw 빠른 데이터 구조 검사"
         )
     )
-    (
-        quality_symbols,
-        quality_failures,
-        changed_from_by_symbol,
-        repaired_rows,
-    ) = run_quality_control(
-        client,
-        storage_format,
-        collected_symbols,
-        state,
-        target_session_utc,
-        start_time,
-        end_time,
-        refresh_start,
-        changed_from_by_symbol,
-        deep_quality,
-        reports,
-    )
-    failures.extend(quality_failures)
-
-    processed_files = 0
-    total_rows = 0
-    kept_rows = 0
-    resampled_files = 0
-    one_minute_rows = 0
-    five_minute_rows = 0
-    audited_files = 0
-    audit_errors = 0
-    print("\n[3/5] XNYS 정규장 1분봉 필터링")
-    try:
-        processed_files, total_rows, kept_rows, filter_failures = run_filter(
-            storage_format,
-            quality_symbols,
-            state,
-            target_session_utc,
-            start_time,
-            end_time,
-            changed_from_by_symbol,
-        )
-        failures.extend(filter_failures)
-        if processed_files == 0:
-            raise RuntimeError("필터링할 수집 파일이 없습니다.")
-
-        print("\n[4/5] 정규장 1분봉에서 SIP 5분봉 생성")
-        failed_filter_symbols = {
-            str(failure["symbol"]) for failure in filter_failures
-        }
-        filtered_symbols = [
-            symbol
-            for symbol in quality_symbols
-            if symbol not in failed_filter_symbols
-        ]
+    for data_type in DATA_TYPES:
+        print(f"\n--- {data_type.upper()} 품질 검사 ---")
         (
-            resampled_files,
-            one_minute_rows,
-            five_minute_rows,
-            resample_failures,
-        ) = run_resample(
+            quality_symbols,
+            quality_failures,
+            downstream_changes,
+            repaired_rows,
+        ) = run_quality_control(
+            client,
             storage_format,
-            filtered_symbols,
+            collected_by_type[data_type],
             state,
             target_session_utc,
             start_time,
             end_time,
-            changed_from_by_symbol,
+            refresh_start,
+            changed_by_type[data_type],
+            deep_quality,
+            reports,
+            data_type=data_type,
         )
-        failures.extend(resample_failures)
-        if resampled_files == 0:
-            raise RuntimeError("5분봉으로 변환할 정규장 1분봉 파일이 없습니다.")
+        failures.extend(quality_failures)
+        quality_by_type[data_type] = quality_symbols
+        changed_by_type[data_type] = downstream_changes
+        metrics_by_type[data_type]["quality_success_symbols"] = len(quality_symbols)
+        metrics_by_type[data_type]["repaired_rows"] = repaired_rows
 
-        print(
-            "\n[5/5] "
-            + (
-                "SIP 1분봉·5분봉 기간 및 누락 구간 상세 검사"
-                if deep_quality
-                else "SIP 1분봉·5분봉 기간·커버리지 요약 검사"
+    print("\n[3/5] Adjusted·Raw XNYS 정규장 1분봉 필터링")
+    for data_type in DATA_TYPES:
+        print(f"\n--- {data_type.upper()} 정규장 필터 ---")
+        try:
+            processed, source_rows, kept_rows, filter_failures = run_filter(
+                storage_format,
+                quality_by_type[data_type],
+                state,
+                target_session_utc,
+                start_time,
+                end_time,
+                changed_by_type[data_type],
+                data_type=data_type,
             )
-        )
-        audited_files, audit_errors = run_validation(
-            storage_format,
-            detailed=deep_quality,
-            reports=reports,
-        )
-    except (OSError, RuntimeError, ValueError, ImportError) as exc:
-        failures.append(
-            {"stage": "postprocess", "symbol": "*", "attempts": 1, "error": str(exc)}
-        )
-        save_failure_report(
-            failures,
-            storage_format,
-            target_session_utc,
-            reports,
-        )
-        save_run_summary(
-            reports,
-            status="failed",
-            storage_format=storage_format,
-            target_session_utc=target_session_utc,
-            started_at_utc=started_at_utc,
-            failures=failures,
-            metrics={
-                "quality_mode": "deep" if deep_quality else "fast",
-                "symbols_total": len(symbols),
-                "collection_success_symbols": len(collected_symbols),
-                "quality_success_symbols": len(quality_symbols),
-                "repaired_rows": repaired_rows,
-                "filtered_files": processed_files,
-                "resampled_files": resampled_files,
-                "audited_files": audited_files,
-                "audit_errors": audit_errors,
-            },
-        )
-        state.finish_run("failed", failures)
-        print(f"[오류] 후처리 실패: {exc}", file=sys.stderr)
-        return 1
-
-
-    if audit_errors:
-        failures.append(
-            {
-                "stage": "validation",
-                "symbol": "*",
-                "attempts": 1,
-                "error": f"검사 오류 파일 {audit_errors}개",
+            failures.extend(filter_failures)
+            if processed == 0:
+                raise RuntimeError("필터링할 수집 파일이 없습니다.")
+            failed_symbols = {
+                str(failure["symbol"]) for failure in filter_failures
             }
+            filtered_by_type[data_type] = [
+                symbol
+                for symbol in quality_by_type[data_type]
+                if symbol not in failed_symbols
+            ]
+            metrics_by_type[data_type]["filtered_files"] = processed
+            metrics_by_type[data_type]["filtered_source_rows"] = source_rows
+            metrics_by_type[data_type]["regular_session_rows"] = kept_rows
+        except (OSError, RuntimeError, ValueError, ImportError) as exc:
+            filtered_by_type[data_type] = []
+            failures.append(
+                {
+                    "stage": "filter",
+                    "data_type": data_type,
+                    "symbol": "*",
+                    "attempts": 1,
+                    "error": str(exc),
+                }
+            )
+
+    print("\n[4/5] Adjusted·Raw 정규장 1분봉에서 SIP 5분봉 생성")
+    for data_type in DATA_TYPES:
+        print(f"\n--- {data_type.upper()} 5분봉 생성 ---")
+        try:
+            resampled, source_rows, output_rows, resample_failures = run_resample(
+                storage_format,
+                filtered_by_type[data_type],
+                state,
+                target_session_utc,
+                start_time,
+                end_time,
+                changed_by_type[data_type],
+                data_type=data_type,
+            )
+            failures.extend(resample_failures)
+            if resampled == 0:
+                raise RuntimeError("5분봉으로 변환할 정규장 1분봉 파일이 없습니다.")
+            metrics_by_type[data_type]["resampled_files"] = resampled
+            metrics_by_type[data_type]["resampled_source_rows"] = source_rows
+            metrics_by_type[data_type]["five_minute_rows"] = output_rows
+        except (OSError, RuntimeError, ValueError, ImportError) as exc:
+            failures.append(
+                {
+                    "stage": "resample_5min",
+                    "data_type": data_type,
+                    "symbol": "*",
+                    "attempts": 1,
+                    "error": str(exc),
+                }
+            )
+
+    print(
+        "\n[5/5] "
+        + (
+            "Adjusted·Raw SIP 1분봉·5분봉 기간 및 누락 구간 상세 검사"
+            if deep_quality
+            else "Adjusted·Raw SIP 1분봉·5분봉 기간·커버리지 요약 검사"
         )
+    )
+    for data_type in DATA_TYPES:
+        print(f"\n--- {data_type.upper()} 보고서 생성 ---")
+        try:
+            audited_files, audit_errors = run_validation(
+                storage_format,
+                detailed=deep_quality,
+                reports=reports,
+                data_type=data_type,
+            )
+            metrics_by_type[data_type]["audited_files"] = audited_files
+            metrics_by_type[data_type]["audit_errors"] = audit_errors
+            if audit_errors:
+                failures.append(
+                    {
+                        "stage": "validation",
+                        "data_type": data_type,
+                        "symbol": "*",
+                        "attempts": 1,
+                        "error": f"검사 오류 파일 {audit_errors}개",
+                    }
+                )
+        except (OSError, RuntimeError, ValueError, ImportError) as exc:
+            failures.append(
+                {
+                    "stage": "validation",
+                    "data_type": data_type,
+                    "symbol": "*",
+                    "attempts": 1,
+                    "error": str(exc),
+                }
+            )
+
+    totals = {
+        key: sum(values[key] for values in metrics_by_type.values())
+        for key in next(iter(metrics_by_type.values()))
+    }
     final_status = "failed" if failures else "success"
     failure_report_path = save_failure_report(
         failures,
@@ -904,43 +1006,33 @@ def run_pipeline(
         failures=failures,
         metrics={
             "quality_mode": "deep" if deep_quality else "fast",
+            "data_types": list(DATA_TYPES),
             "symbols_total": len(symbols),
-            "collection_success_symbols": len(collected_symbols),
-            "quality_success_symbols": len(quality_symbols),
-            "repaired_rows": repaired_rows,
-            "filtered_files": processed_files,
-            "filtered_source_rows": total_rows,
-            "regular_session_rows": kept_rows,
-            "resampled_files": resampled_files,
-            "resampled_source_rows": one_minute_rows,
-            "five_minute_rows": five_minute_rows,
-            "audited_files": audited_files,
-            "audit_errors": audit_errors,
+            **totals,
+            "by_data_type": metrics_by_type,
         },
     )
     state.finish_run(final_status, failures)
 
     print("=" * 72)
-    print(
-        f"완료: 수집 성공 {len(symbols) - len(failed_collection_symbols)}/{len(symbols)}개, "
-        f"1분봉 필터 {processed_files}개 파일 ({total_rows:,} -> {kept_rows:,}행), "
-        f"5분봉 {resampled_files}개 파일 "
-        f"({one_minute_rows:,} -> {five_minute_rows:,}행), "
-        f"검사 {audited_files}개 파일"
-    )
-    quality_result_text = (
-        f"최근 누락 복구 {repaired_rows:,}행"
-        if deep_quality
-        else "누락 재요청 생략"
-    )
-    print(
-        f"품질 검사 통과 {len(quality_symbols)}/{len(collected_symbols)}개, "
-        f"{quality_result_text}"
-    )
+    for data_type in DATA_TYPES:
+        metrics = metrics_by_type[data_type]
+        quality_result_text = (
+            f"최근 누락 복구 {metrics['repaired_rows']:,}행"
+            if deep_quality
+            else "누락 재요청 생략"
+        )
+        print(
+            f"{data_type.upper()}: 수집 {metrics['collection_success_symbols']}/{len(symbols)}개, "
+            f"품질 {metrics['quality_success_symbols']}개, "
+            f"1분봉 필터 {metrics['filtered_files']}개 파일, "
+            f"5분봉 {metrics['resampled_files']}개 파일, "
+            f"검사 {metrics['audited_files']}개 파일, {quality_result_text}"
+        )
     if failures:
         print(f"최종 실패 {len(failures)}건: {failure_report_path}")
-    if audit_errors:
-        print(f"검사 오류 파일: {audit_errors}개")
+    if totals["audit_errors"]:
+        print(f"검사 오류 파일: {totals['audit_errors']}개")
     print(f"실행 요약: {run_summary_path}")
     print(f"거래일별 보고서: {reports.history_root}")
     return 1 if failures else 0
@@ -949,7 +1041,7 @@ def run_pipeline(
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "SIP Adjusted 1분봉을 갱신하고 정규장 필터링, 5분봉 생성과 "
+            "SIP Adjusted·Raw 1분봉을 갱신하고 정규장 필터링, 5분봉 생성과 "
             "데이터 검사를 수행합니다."
         )
     )

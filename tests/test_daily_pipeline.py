@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import pandas as pd
 
@@ -14,8 +14,12 @@ from daily_pipeline import (
     load_pipeline_symbols,
     parse_args,
     run_collection,
+    run_filter,
     run_pipeline,
+    run_resample,
+    run_validation,
 )
+from pipeline_reporting import DailyReportStore
 from pipeline_state import PipelineStateStore
 
 
@@ -128,52 +132,133 @@ class DailyPipelineTests(unittest.TestCase):
         state = mock_state_class.return_value
         reports = mock_report_store_class.for_target_session.return_value
         reports.prune_history.assert_called_once_with()
-        mock_collect.assert_called_once_with(
-            mock_client.return_value,
-            ["AAPL"],
-            "parquet",
-            window[0],
-            window[1],
-            state,
-            pd.Timestamp(window[1]).isoformat(),
-            refresh_start,
+        mock_collect.assert_has_calls(
+            [
+                call(
+                    mock_client.return_value,
+                    ["AAPL"],
+                    "parquet",
+                    window[0],
+                    window[1],
+                    state,
+                    pd.Timestamp(window[1]).isoformat(),
+                    refresh_start,
+                    data_type="adjusted",
+                ),
+                call(
+                    mock_client.return_value,
+                    ["AAPL"],
+                    "parquet",
+                    window[0],
+                    window[1],
+                    state,
+                    pd.Timestamp(window[1]).isoformat(),
+                    None,
+                    data_type="raw",
+                ),
+            ]
         )
-        mock_quality.assert_called_once_with(
-            mock_client.return_value,
-            "parquet",
-            ["AAPL"],
-            state,
-            pd.Timestamp(window[1]).isoformat(),
-            window[0],
-            window[1],
-            refresh_start,
-            changes,
-            False,
-            reports,
+        self.assertEqual(mock_collect.call_count, 2)
+        mock_quality.assert_has_calls(
+            [
+                call(
+                    mock_client.return_value,
+                    "parquet",
+                    ["AAPL"],
+                    state,
+                    pd.Timestamp(window[1]).isoformat(),
+                    window[0],
+                    window[1],
+                    refresh_start,
+                    changes,
+                    False,
+                    reports,
+                    data_type="adjusted",
+                ),
+                call(
+                    mock_client.return_value,
+                    "parquet",
+                    ["AAPL"],
+                    state,
+                    pd.Timestamp(window[1]).isoformat(),
+                    window[0],
+                    window[1],
+                    refresh_start,
+                    changes,
+                    False,
+                    reports,
+                    data_type="raw",
+                ),
+            ]
         )
-        mock_filter.assert_called_once_with(
-            "parquet",
-            ["AAPL"],
-            state,
-            pd.Timestamp(window[1]).isoformat(),
-            window[0],
-            window[1],
-            changes,
+        self.assertEqual(mock_quality.call_count, 2)
+        mock_filter.assert_has_calls(
+            [
+                call(
+                    "parquet",
+                    ["AAPL"],
+                    state,
+                    pd.Timestamp(window[1]).isoformat(),
+                    window[0],
+                    window[1],
+                    changes,
+                    data_type="adjusted",
+                ),
+                call(
+                    "parquet",
+                    ["AAPL"],
+                    state,
+                    pd.Timestamp(window[1]).isoformat(),
+                    window[0],
+                    window[1],
+                    changes,
+                    data_type="raw",
+                ),
+            ]
         )
-        mock_resample.assert_called_once_with(
-            "parquet",
-            ["AAPL"],
-            state,
-            pd.Timestamp(window[1]).isoformat(),
-            window[0],
-            window[1],
-            changes,
+        self.assertEqual(mock_filter.call_count, 2)
+        mock_resample.assert_has_calls(
+            [
+                call(
+                    "parquet",
+                    ["AAPL"],
+                    state,
+                    pd.Timestamp(window[1]).isoformat(),
+                    window[0],
+                    window[1],
+                    changes,
+                    data_type="adjusted",
+                ),
+                call(
+                    "parquet",
+                    ["AAPL"],
+                    state,
+                    pd.Timestamp(window[1]).isoformat(),
+                    window[0],
+                    window[1],
+                    changes,
+                    data_type="raw",
+                ),
+            ]
         )
-        mock_audit.assert_called_once_with(
-            "parquet",
-            detailed=False,
-            reports=reports,
+        self.assertEqual(mock_resample.call_count, 2)
+        mock_audit.assert_has_calls(
+            [
+                call(
+                    "parquet",
+                    detailed=False,
+                    reports=reports,
+                    data_type="adjusted",
+                ),
+                call(
+                    "parquet",
+                    detailed=False,
+                    reports=reports,
+                    data_type="raw",
+                ),
+            ]
         )
+        self.assertEqual(mock_audit.call_count, 2)
         mock_failure_report.assert_called_once_with(
             [],
             "parquet",
@@ -208,6 +293,131 @@ class DailyPipelineTests(unittest.TestCase):
             checkpoint = state.data["checkpoints"]["csv"]["AAPL"]["collection"]
             self.assertEqual(checkpoint["status"], "success")
             self.assertEqual(checkpoint["attempt"], 2)
+
+    @patch(
+        "daily_pipeline.update_symbol_data",
+        return_value=CollectionResult(True),
+    )
+    def test_raw_collection_uses_independent_checkpoint(self, mock_process):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            state = PipelineStateStore(Path(temporary_directory) / "state.json")
+            failures, _ = run_collection(
+                Mock(),
+                ["AAPL"],
+                "parquet",
+                datetime(2022, 1, 1, tzinfo=timezone.utc),
+                datetime(2025, 1, 1, tzinfo=timezone.utc),
+                state,
+                "2025-01-01T00:00:00+00:00",
+                None,
+                retry_delay=0,
+                data_type="raw",
+            )
+
+            self.assertEqual(failures, [])
+            self.assertIn(
+                "raw_collection",
+                state.data["checkpoints"]["parquet"]["AAPL"],
+            )
+            self.assertEqual(mock_process.call_args.args[2], "raw")
+
+    def test_raw_postprocessing_uses_separate_paths_and_reports(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            collection_root = root / "sip_market_data"
+            filtered_root = root / "regular_sip_1min_market_data"
+            resampled_root = root / "regular_sip_5min_market_data"
+            input_path = (
+                collection_root
+                / "raw"
+                / "csv"
+                / "AAPL_1min_sip_historical.csv"
+            )
+            input_path.parent.mkdir(parents=True)
+            timestamps = pd.date_range(
+                "2025-02-03 14:30:00+00:00",
+                periods=5,
+                freq="1min",
+            )
+            index = pd.MultiIndex.from_arrays(
+                [["AAPL"] * 5, timestamps],
+                names=["symbol", "timestamp"],
+            )
+            pd.DataFrame(
+                {
+                    "open": [10, 11, 12, 13, 14],
+                    "high": [11, 12, 13, 14, 15],
+                    "low": [9, 10, 11, 12, 13],
+                    "close": [10.5, 11.5, 12.5, 13.5, 14.5],
+                    "volume": [100, 200, 300, 400, 500],
+                },
+                index=index,
+            ).to_csv(input_path, index=True)
+
+            state = PipelineStateStore(root / "state.json")
+            target = "2025-02-03T21:00:00+00:00"
+            start = datetime(2025, 2, 3, tzinfo=timezone.utc)
+            end = datetime(2025, 2, 4, tzinfo=timezone.utc)
+            reports = DailyReportStore.for_target_session(
+                target,
+                "csv",
+                "XNYS",
+                report_root=root / "report",
+            )
+            with (
+                patch("daily_pipeline.COLLECTION_ROOT", collection_root),
+                patch("daily_pipeline.FILTERED_ROOT", filtered_root),
+                patch("daily_pipeline.RESAMPLED_ROOT", resampled_root),
+            ):
+                filtered = run_filter(
+                    "csv",
+                    ["AAPL"],
+                    state,
+                    target,
+                    start,
+                    end,
+                    data_type="raw",
+                )
+                resampled = run_resample(
+                    "csv",
+                    ["AAPL"],
+                    state,
+                    target,
+                    start,
+                    end,
+                    data_type="raw",
+                )
+                audited = run_validation(
+                    "csv",
+                    reports=reports,
+                    data_type="raw",
+                )
+
+            self.assertEqual(filtered[:3], (1, 5, 5))
+            self.assertEqual(resampled[:3], (1, 5, 1))
+            self.assertEqual(audited, (2, 0))
+            self.assertTrue(
+                (
+                    filtered_root
+                    / "raw"
+                    / "csv"
+                    / "AAPL_1min_sip_historical.csv"
+                ).is_file()
+            )
+            self.assertTrue(
+                (
+                    resampled_root
+                    / "raw"
+                    / "csv"
+                    / "AAPL_5min_sip_historical.csv"
+                ).is_file()
+            )
+            self.assertTrue(
+                (reports.latest_root / "raw_1min_summary.csv").is_file()
+            )
+            self.assertTrue(
+                (reports.latest_root / "raw_5min_summary.csv").is_file()
+            )
 
 
 if __name__ == "__main__":

@@ -38,7 +38,11 @@ python data_collection/collect_sip_1min.py
 python data_collection/collect_sip_1min.py --data-type raw --format parquet --symbols AAPL
 ```
 
-전체 S&P 500 관련 종목의 3년치 1분봉은 API 요청 수, 실행 시간과 저장 공간이 매우 큽니다. 작은 종목 목록으로 먼저 검증한 뒤 전체 수집을 권장합니다.
+전체 S&P 500 관련 종목과 ETF의 3년치 1분봉은 API 요청 수, 실행 시간과 저장 공간이 매우 큽니다. 작은 종목 목록으로 먼저 검증한 뒤 전체 수집을 권장합니다.
+
+### `etf_universe.py`
+
+`ticker_info/etf_universe.csv`를 검증해 통합 파이프라인에 추가할 ETF·ETP 티커를 반환합니다. 활성화되고 허용된 상품 구조 가운데 레버리지·인버스를 제외하고 수집 종료 시점 기준 3년 이상의 상장 이력이 있는 상품만 사용합니다. 시장·해외주식·채권·S&P 500 11개 섹터 대표 ETF 23개와 `GLD`, `USO`, `UUP`, `BITO` 대체자산 ETP 4개가 등록되어 있습니다. 통합 파이프라인은 이 목록을 S&P 500 관련 티커와 합친 뒤 Adjusted·Raw 수집부터 모든 후속 단계에 동일하게 전달합니다.
 
 수집한 SIP 1분봉에서 정규장 데이터만 분리하려면 다음 명령을 실행하고 SIP 데이터셋을 선택합니다.
 
@@ -55,6 +59,7 @@ python data_filtering/filter_regular_session.py --dataset sip
 | Adjusted CSV | `adjust_market_data/csv/{TICKER}_5min_historical.csv` |
 | Adjusted Parquet | `adjust_market_data/parquet/{TICKER}_5min_historical.parquet` |
 | 공통 | `ticker_info/sp500_tickers_3years.txt` |
+| ETF 유니버스 | `ticker_info/etf_universe.csv` |
 | SIP Raw | `sip_market_data/raw/{csv,parquet}/{TICKER}_1min_sip_historical.*` |
 | SIP Adjusted | `sip_market_data/adjusted/{csv,parquet}/{TICKER}_1min_sip_historical.*` |
 

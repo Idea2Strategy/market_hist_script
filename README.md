@@ -1,6 +1,6 @@
 # 미국 주식 데이터 파이프라인
 
-Wikipedia와 Alpaca에서 최근 3년의 S&P 500 관련 종목을 수집하고, 정규장 데이터 분리와 데이터 품질 검사를 수행하는 프로젝트입니다.
+Wikipedia와 공식 운용사 자료를 기준으로 최근 3년의 S&P 500 관련 종목과 대표 ETF를 구성하고, Alpaca SIP 수집·정규장 데이터 분리·다중 주기 봉 생성·데이터 품질 검사를 수행하는 프로젝트입니다.
 
 ## 프로젝트 구조
 
@@ -13,6 +13,7 @@ market_hist_script/
 ├── data_collection/              # API 호출 및 크롤링
 │   ├── script.py
 │   ├── collect_sip_1min.py
+│   ├── etf_universe.py
 │   ├── get_ticker.py
 │   └── README.md
 ├── data_filtering/               # 정규장 데이터 필터링
@@ -74,7 +75,8 @@ market_hist_script/
 │   ├── raw/{csv,parquet}/
 │   └── adjusted/{csv,parquet}/
 ├── ticker_info/
-│   └── sp500_tickers_3years.txt
+│   ├── sp500_tickers_3years.txt
+│   └── etf_universe.csv           # 검토된 대표 ETF 메타데이터
 ├── pipeline_state/
 │   └── daily_pipeline_state.json # 종목·형식·가격 타입·단계별 체크포인트
 └── report/
@@ -109,7 +111,7 @@ market_hist_script/
 | --- | --- | --- |
 | `market_data/` | `data_collection/script.py` | Raw 5분봉 CSV 또는 Parquet |
 | `adjust_market_data/` | `data_collection/script.py` | 수정주가 5분봉 CSV 또는 Parquet |
-| `ticker_info/` | `data_collection/script.py` | 수집 대상 티커 목록 |
+| `ticker_info/` | `data_collection/script.py`, `daily_pipeline.py` | S&P 500 관련 티커와 대표 ETF 유니버스 |
 | `sip_market_data/` | `data_collection/collect_sip_1min.py` | SIP 최근 3년 1분봉 Raw/Adjusted 데이터 |
 | `regular_market_data/` | `data_filtering/filter_regular_session.py` | 휴장·조기 폐장·서머타임을 반영한 정규장 데이터 |
 | `regular_sip_1min_market_data/` | `data_filtering/filter_regular_session.py` | SIP 1분봉의 정규장 필터 결과 |
@@ -176,7 +178,7 @@ export ALPACA_SECRET_KEY="발급받은_SECRET_KEY"
 
 프로젝트 최상단의 `daily_pipeline.py`는 다음 작업을 순서대로 수행합니다.
 
-1. Wikipedia에서 현재 및 최근 3년 S&P 500 관련 티커 갱신
+1. Wikipedia의 현재·최근 3년 S&P 500 관련 티커와 `ticker_info/etf_universe.csv`의 적격 ETF를 합쳐 수집 유니버스 구성
 2. Alpaca SIP Adjusted·Raw 1분봉을 각각 수집 또는 증분 갱신
 3. Adjusted·Raw 원본 1분봉의 데이터 품질 검사
 4. 두 데이터 타입을 XNYS 캘린더로 각각 정규장 데이터로 분리
@@ -184,6 +186,20 @@ export ALPACA_SECRET_KEY="발급받은_SECRET_KEY"
 6. 데이터 타입·봉 주기별 커버리지와 누락 구간 보고서 생성
 
 대화형으로 선택하는 값은 CSV 또는 Parquet 형식뿐입니다. 피드는 SIP, 봉 간격은 1분, 가격 타입은 Adjusted와 Raw 모두, 캘린더는 XNYS로 고정됩니다. 기본 품질 단계는 두 데이터 타입의 중복과 OHLCV 구조만 빠르게 검사하며 누락 구간 API 재요청과 상세 보고서는 생성하지 않습니다.
+
+### ETF 유니버스
+
+통합 파이프라인은 S&P 500 관련 종목에 다음 27개 대표 ETF·ETP를 합칩니다.
+
+- 시장·스타일: `SPY`, `QQQ`, `IJH`, `IWM`
+- 해외 주식: `VEA`, `VWO`
+- 채권: `AGG`, `SGOV`, `IEF`, `TLT`, `LQD`, `HYG`
+- S&P 500 섹터: `XLK`, `XLF`, `XLV`, `XLY`, `XLP`, `XLI`, `XLE`, `XLU`, `XLB`, `XLRE`, `XLC`
+- 대체자산 ETP: `GLD`(금 현물 연계), `USO`(원유 선물), `UUP`(달러 선물), `BITO`(비트코인 선물·스왑)
+
+ETF·ETP 메타데이터는 `ticker_info/etf_universe.csv`에서 버전 관리합니다. `enabled=true`, 허용된 `open_end`·`uit`·`grantor_trust`·`commodity_pool` 구조, 비레버리지·비인버스, 수집 종료 시점 기준 상장 이력 3년 이상인 행만 로드합니다. ETN이나 허용되지 않은 구조, 잘못된 공식 출처 URL, 중복 티커가 있으면 파이프라인 준비 단계에서 오류로 중단합니다. 파일에는 자산군, 범주, 벤치마크, 운용사, 상장일, 검토일과 공식 출처 URL을 함께 기록합니다.
+
+적격 ETF는 S&P 종목과 동일한 목록으로 합쳐지므로 SIP Adjusted·Raw 1분봉 수집, 품질 검사, XNYS 정규장 필터, 5분·15분·1시간·4시간·1일봉 생성과 최종 보고서까지 모두 같은 규칙으로 처리됩니다. 실행 요약에는 `etf_symbols_total`, `etf_symbols`, `sp500_related_symbols_total`이 기록됩니다.
 
 ```bash
 python daily_pipeline.py

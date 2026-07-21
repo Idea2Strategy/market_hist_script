@@ -6,7 +6,7 @@
 
 `daily_pipeline.py`가 만드는 요약 보고서는 `report/latest/{format}/`과 `report/history/{미국 거래일}/{format}/`에 함께 저장됩니다. 아래 `audit_regular_session.py`를 직접 실행할 때는 기존의 `regular_*_audit/` 경로를 사용합니다.
 
-Adjusted 보고서는 기존 `quality_summary.csv`, `1min_summary.csv`, `5min_summary.csv` 이름을 유지합니다. Raw 보고서는 같은 위치에 `raw_quality_summary.csv`, `raw_1min_summary.csv`, `raw_5min_summary.csv`처럼 `raw_` 접두사로 분리해 저장합니다. 상세 품질 모드의 Raw 누락 보고서도 `deep_quality/raw_*.csv`로 분리됩니다.
+Adjusted 보고서는 기존 `quality_summary.csv`, `1min_summary.csv`, `5min_summary.csv` 이름을 유지하고 `15min_summary.csv`, `1hour_summary.csv`, `4hour_summary.csv`, `1day_summary.csv`를 추가합니다. Raw 보고서는 같은 위치에 `raw_quality_summary.csv`, `raw_1min_summary.csv`, `raw_5min_summary.csv`, `raw_15min_summary.csv`처럼 `raw_` 접두사로 분리해 저장합니다. 상세 품질 모드의 Raw 누락 보고서도 `deep_quality/raw_*.csv`로 분리됩니다.
 
 ## 스크립트
 

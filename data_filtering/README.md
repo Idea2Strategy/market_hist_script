@@ -56,21 +56,26 @@ regular_sip_1min_market_data/
 
 ### `resample_sip_5min.py`
 
-정규장 SIP Adjusted 또는 Raw 1분봉을 종목·거래일별 5분봉으로 집계합니다. OHLC는 첫 시가, 최고 고가, 최저 저가, 마지막 종가를 사용하고 `volume`과 `trade_count`는 합산합니다. `vwap`은 1분봉 거래량으로 가중해 다시 계산하며, 각 구간에 실제로 존재한 1분봉 개수는 `source_minutes`로 저장합니다. 누락된 1분봉을 임의로 생성하거나 보간하지 않습니다.
+정규장 SIP Adjusted 또는 Raw 1분봉을 종목·거래일별 5분·15분·1시간·4시간·1일봉으로 집계합니다. 파일명은 기존 호환성을 위해 유지했지만 공통 다중 주기 리샘플러로 동작합니다. OHLC는 첫 시가, 최고 고가, 최저 저가, 마지막 종가를 사용하고 `volume`과 `trade_count`는 합산합니다. `vwap`은 1분봉 거래량으로 가중해 다시 계산하며, 각 구간에 실제로 존재한 1분봉 개수는 `source_minutes`로 저장합니다. 누락된 1분봉을 임의로 생성하거나 보간하지 않습니다.
+
+모든 구간은 자정이 아닌 XNYS 공식 개장 시각에 맞춰집니다. 정상 거래일의 1시간봉은 09:30부터 시작하고 마지막 봉은 30분 분량이며, 4시간봉은 09:30부터 4시간과 남은 2시간 30분으로 나뉩니다. 조기폐장일도 실제 세션 종료까지만 집계하고, 1일봉은 세션당 한 행을 생성합니다.
 
 ```bash
 python data_filtering/resample_sip_5min.py --format parquet
 
-# Raw 정규장 1분봉을 Raw 5분봉으로 집계
-python data_filtering/resample_sip_5min.py --format parquet --data-type raw
+# Raw 정규장 1분봉을 Raw 15분봉으로 집계
+python data_filtering/resample_sip_5min.py --format parquet --data-type raw --interval 15min
+
+# 지원 간격: 5min, 15min, 1hour, 4hour, 1day
+python data_filtering/resample_sip_5min.py --format parquet --interval 1hour
 ```
 
 ```text
 입력: regular_sip_1min_market_data/{adjusted,raw}/{format}/
-출력: regular_sip_5min_market_data/{adjusted,raw}/{format}/
-파일: {TICKER}_5min_sip_historical.{format}
+출력: regular_sip_{interval}_market_data/{adjusted,raw}/{format}/
+파일: {TICKER}_{interval}_sip_historical.{format}
 ```
 
-`daily_pipeline.py`를 실행하면 Adjusted와 Raw에 대해 이 단계가 각각 자동으로 수행됩니다.
+`daily_pipeline.py`를 실행하면 Adjusted와 Raw에 대해 지원하는 다섯 간격이 모두 자동으로 생성됩니다.
 
-통합 파이프라인에서는 정규장 필터와 5분봉 생성을 증분 방식으로 처리합니다. 기존 결과의 마지막 거래 세션을 다시 계산해 부분 저장이나 마지막 5분 구간을 교체하고, 그보다 오래된 결과는 유지한 채 새 거래 세션만 병합합니다. 이 동작은 개별 스크립트의 전체 재생성 모드에는 영향을 주지 않습니다.
+통합 파이프라인에서는 정규장 필터와 각 집계봉 생성을 증분 방식으로 처리합니다. 주기별 기존 결과의 마지막 거래 세션을 다시 계산해 부분 저장이나 마지막 미완성 구간을 교체하고, 그보다 오래된 결과는 유지한 채 새 거래 세션만 병합합니다. 이 동작은 개별 스크립트의 전체 재생성 모드에는 영향을 주지 않습니다.

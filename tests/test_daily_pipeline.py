@@ -63,9 +63,13 @@ class DailyPipelineTests(unittest.TestCase):
     def test_valid_ticker_refresh_replaces_cache(self, _mock_fetch):
         with tempfile.TemporaryDirectory() as temporary_directory:
             ticker_file = Path(temporary_directory) / "tickers.txt"
-            symbols = load_pipeline_symbols(ticker_file, minimum_count=2)
+            symbols = load_pipeline_symbols(
+                ticker_file,
+                minimum_count=2,
+                additional_symbols=["SPY"],
+            )
 
-            self.assertEqual(symbols, ["AAPL", "MSFT"])
+            self.assertEqual(symbols, ["AAPL", "MSFT", "SPY"])
             self.assertEqual(
                 ticker_file.read_text(encoding="utf-8"),
                 "AAPL\nMSFT\n",
@@ -95,6 +99,7 @@ class DailyPipelineTests(unittest.TestCase):
         )
         refresh_start = datetime(2025, 6, 20, 13, 30, tzinfo=timezone.utc)
         changes = {"AAPL": pd.Timestamp("2025-07-03 13:30:00+00:00")}
+        pipeline_symbols = ["AAPL", "SPY"]
         with (
             patch.dict(
                 os.environ,
@@ -103,7 +108,12 @@ class DailyPipelineTests(unittest.TestCase):
             patch("daily_pipeline.load_dotenv"),
             patch("daily_pipeline.completed_collection_window", return_value=window),
             patch("daily_pipeline.adjusted_refresh_start", return_value=refresh_start),
-            patch("daily_pipeline.load_pipeline_symbols", return_value=["AAPL"]),
+            patch(
+                "daily_pipeline.load_etf_symbols", return_value=["SPY"]
+            ) as mock_load_etfs,
+            patch(
+                "daily_pipeline.load_pipeline_symbols", return_value=pipeline_symbols
+            ) as mock_load_symbols,
             patch("daily_pipeline.PipelineStateStore") as mock_state_class,
             patch("daily_pipeline.DailyReportStore") as mock_report_store_class,
             patch("daily_pipeline.StockHistoricalDataClient") as mock_client,
@@ -114,7 +124,7 @@ class DailyPipelineTests(unittest.TestCase):
             ) as mock_collect,
             patch(
                 "daily_pipeline.run_quality_control",
-                return_value=(["AAPL"], [], changes, 0),
+                return_value=(pipeline_symbols, [], changes, 0),
             ) as mock_quality,
             patch(
                 "daily_pipeline.run_filter",
@@ -134,11 +144,13 @@ class DailyPipelineTests(unittest.TestCase):
         state = mock_state_class.return_value
         reports = mock_report_store_class.for_target_session.return_value
         reports.prune_history.assert_called_once_with()
+        mock_load_etfs.assert_called_once_with(as_of=window[1])
+        mock_load_symbols.assert_called_once_with(additional_symbols=["SPY"])
         mock_collect.assert_has_calls(
             [
                 call(
                     mock_client.return_value,
-                    ["AAPL"],
+                    pipeline_symbols,
                     "parquet",
                     window[0],
                     window[1],
@@ -151,7 +163,7 @@ class DailyPipelineTests(unittest.TestCase):
                 ),
                 call(
                     mock_client.return_value,
-                    ["AAPL"],
+                    pipeline_symbols,
                     "parquet",
                     window[0],
                     window[1],
@@ -170,7 +182,7 @@ class DailyPipelineTests(unittest.TestCase):
                 call(
                     mock_client.return_value,
                     "parquet",
-                    ["AAPL"],
+                    pipeline_symbols,
                     state,
                     pd.Timestamp(window[1]).isoformat(),
                     window[0],
@@ -184,7 +196,7 @@ class DailyPipelineTests(unittest.TestCase):
                 call(
                     mock_client.return_value,
                     "parquet",
-                    ["AAPL"],
+                    pipeline_symbols,
                     state,
                     pd.Timestamp(window[1]).isoformat(),
                     window[0],
@@ -202,7 +214,7 @@ class DailyPipelineTests(unittest.TestCase):
             [
                 call(
                     "parquet",
-                    ["AAPL"],
+                    pipeline_symbols,
                     state,
                     pd.Timestamp(window[1]).isoformat(),
                     window[0],
@@ -212,7 +224,7 @@ class DailyPipelineTests(unittest.TestCase):
                 ),
                 call(
                     "parquet",
-                    ["AAPL"],
+                    pipeline_symbols,
                     state,
                     pd.Timestamp(window[1]).isoformat(),
                     window[0],
@@ -228,7 +240,7 @@ class DailyPipelineTests(unittest.TestCase):
             [
                 call(
                     "parquet",
-                    ["AAPL"],
+                    pipeline_symbols,
                     state,
                     pd.Timestamp(window[1]).isoformat(),
                     window[0],
@@ -266,6 +278,11 @@ class DailyPipelineTests(unittest.TestCase):
             reports,
         )
         mock_run_summary.assert_called_once()
+        summary_metrics = mock_run_summary.call_args.kwargs["metrics"]
+        self.assertEqual(summary_metrics["symbols_total"], 2)
+        self.assertEqual(summary_metrics["sp500_related_symbols_total"], 1)
+        self.assertEqual(summary_metrics["etf_symbols_total"], 1)
+        self.assertEqual(summary_metrics["etf_symbols"], ["SPY"])
         state.finish_run.assert_called_once_with("success", [])
 
     @patch(

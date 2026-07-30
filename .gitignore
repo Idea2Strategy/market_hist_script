@@ -24,6 +24,7 @@ report/history/
 *.txt
 !ticker_info/etf_universe.csv
 !examples/*.csv
+!idea2strategy-market-loader/examples/*.csv
 backfill-output/
 market_data_store/
 db-plan/

@@ -1,0 +1,3 @@
+provider_symbol,asset_type,primary_exchange_mic,effective_from,effective_to,support_status,instrument_id
+AAPL,STOCK,XNAS,2016-01-01,,ACTIVE,
+SPY,ETF,ARCX,2016-01-01,,ACTIVE,

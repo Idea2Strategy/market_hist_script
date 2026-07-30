@@ -31,8 +31,11 @@ from market_loader.storage.s3 import ImmutableS3
 from market_loader.universe_builder import (
     fetch_assets,
     fetch_assets_by_symbol,
+    fetch_last_sip_bar_dates,
+    historical_probe_symbols,
     missing_asset_symbols,
     read_candidates,
+    read_historical_overrides,
     resolve_candidates,
     write_universe,
     write_unresolved,
@@ -132,13 +135,16 @@ def build_universe(
     etfs: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
     output: Annotated[Path, typer.Option(dir_okay=False)],
     start: Annotated[str, typer.Option()],
+    overrides: Annotated[Path | None, typer.Option(exists=True, dir_okay=False)] = None,
     trading_base_url: Annotated[str, typer.Option()] = "https://paper-api.alpaca.markets",
+    data_base_url: Annotated[str, typer.Option()] = "https://data.alpaca.markets",
     overwrite: Annotated[bool, typer.Option()] = False,
 ) -> None:
     """Build a loader universe from stock and ETF sources using Alpaca asset metadata."""
     try:
         start_date = _parse_date(start, "--start")
         candidates = read_candidates(stocks, etfs, start_date)
+        historical_overrides = read_historical_overrides(overrides)
         settings = EnvironmentSettings()
         assets = fetch_assets(
             api_key=settings.ALPACA_API_KEY,
@@ -154,7 +160,21 @@ def build_universe(
                 base_url=trading_base_url,
             )
         )
-        resolved, unresolved = resolve_candidates(candidates, assets)
+        probe_symbols = historical_probe_symbols(candidates, assets, historical_overrides)
+        last_bar_dates = fetch_last_sip_bar_dates(
+            symbols=probe_symbols,
+            start=start_date,
+            end=date.today() + timedelta(days=1),
+            api_key=settings.ALPACA_API_KEY,
+            api_secret=settings.ALPACA_API_SECRET,
+            base_url=data_base_url,
+        )
+        resolved, unresolved = resolve_candidates(
+            candidates,
+            assets,
+            historical_overrides,
+            last_bar_dates,
+        )
         unresolved_path = output.with_suffix(output.suffix + ".unresolved.csv")
         if unresolved:
             write_unresolved(unresolved_path, unresolved)
@@ -169,6 +189,8 @@ def build_universe(
                 "ok": True,
                 "candidate_count": len(candidates),
                 "individual_lookup_count": len(missing_symbols),
+                "historical_override_count": len(historical_overrides),
+                "historical_probe_count": len(probe_symbols),
                 "output_count": len(resolved),
                 "output": str(output.resolve()),
                 "start": start_date,

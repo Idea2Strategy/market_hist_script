@@ -23,6 +23,7 @@ report/history/
 *.csv
 *.txt
 !ticker_info/etf_universe.csv
+!ticker_info/historical_asset_overrides.csv
 !ticker_info/sp500_tickers_10years.txt
 !examples/*.csv
 !idea2strategy-market-loader/examples/*.csv

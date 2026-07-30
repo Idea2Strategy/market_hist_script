@@ -31,9 +31,16 @@ read-only Assets API and refuses to write the final CSV if any symbol is unresol
 uv run market-loader build-universe `
   --stocks ..\ticker_info\sp500_tickers_10years.txt `
   --etfs ..\ticker_info\etf_universe.csv `
+  --overrides ..\ticker_info\historical_asset_overrides.csv `
   --output .\universe.csv `
-  --start 2016-07-30
+  --start 2016-01-01
 ```
+
+The reviewed override file supplies the former primary exchange only for historical
+symbols that the current Alpaca Assets API no longer resolves. Each overridden or
+inactive symbol must also return at least one exact-symbol historical SIP bar.
+The latest returned session date becomes `effective_to`; no missing symbol is
+silently omitted.
 
 Apply `db/migration/V001__market_data_initial_schema.sql` through the deployment
 Flyway process before executing any write command. The `market_loader` login role

@@ -68,6 +68,7 @@ def test_client_retries_429_and_preserves_required_request_contract() -> None:
     assert len(calls) == 2
     assert calls[-1].url.params["timeframe"] == "30Min"
     assert calls[-1].url.params["feed"] == "sip"
+    assert calls[-1].url.params["asof"] == "-"
     assert calls[-1].headers["APCA-API-KEY-ID"] == "key"
     assert delays == [0.001]
 

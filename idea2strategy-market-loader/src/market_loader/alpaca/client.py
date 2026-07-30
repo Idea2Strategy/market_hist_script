@@ -74,6 +74,7 @@ class AlpacaBarsClient:
             "feed": self._config.feed,
             "sort": "asc",
             "limit": self._config.page_limit,
+            "asof": "-",
         }
         token: str | None = None
         seen: set[str] = set()

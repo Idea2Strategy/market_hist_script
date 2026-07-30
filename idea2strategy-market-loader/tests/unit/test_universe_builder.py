@@ -11,8 +11,11 @@ from market_loader.universe_builder import (
     UniverseCandidate,
     canonical_alpaca_symbol,
     fetch_assets_by_symbol,
+    fetch_last_sip_bar_dates,
+    historical_probe_symbols,
     missing_asset_symbols,
     read_candidates,
+    read_historical_overrides,
     resolve_candidates,
     write_universe,
 )
@@ -101,3 +104,55 @@ def test_individual_asset_fallback_keeps_found_and_ignores_404() -> None:
         UniverseCandidate("MISSING", "STOCK", date(2016, 1, 1)),
     ]
     assert missing_asset_symbols(candidates, assets) == ["MISSING"]
+
+
+def test_historical_override_requires_and_uses_last_sip_bar(tmp_path: Path) -> None:
+    overrides_path = tmp_path / "overrides.csv"
+    overrides_path.write_text(
+        "provider_symbol,primary_exchange_mic,reviewed_at\nSBNY,XNAS,2026-07-30\n",
+        encoding="utf-8",
+    )
+    overrides = read_historical_overrides(overrides_path)
+    candidates = [UniverseCandidate("SBNY", "STOCK", date(2016, 1, 1))]
+    assets = [{"symbol": "SBNY", "exchange": "OTC", "status": "inactive"}]
+
+    assert historical_probe_symbols(candidates, assets, overrides) == ["SBNY"]
+    resolved, unresolved = resolve_candidates(
+        candidates,
+        assets,
+        overrides,
+        {"SBNY": date(2023, 3, 10)},
+    )
+
+    assert unresolved == []
+    assert resolved[0].primary_exchange_mic == "XNAS"
+    assert resolved[0].effective_to == date(2023, 3, 10)
+
+
+def test_historical_sip_probe_uses_exact_symbol_and_returns_last_date() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/SBNY/bars"):
+            return httpx.Response(200, json={"bars": [{"t": "2023-03-10T05:00:00Z"}]})
+        return httpx.Response(200, json={"bars": []})
+
+    client = httpx.Client(
+        transport=httpx.MockTransport(handler),
+        base_url="https://data.alpaca.markets",
+    )
+    dates = fetch_last_sip_bar_dates(
+        symbols=["SBNY", "MISSING"],
+        start=date(2016, 1, 1),
+        end=date(2026, 1, 1),
+        api_key="key",
+        api_secret=uuid4().hex,
+        base_url="https://data.alpaca.markets",
+        client=client,
+    )
+
+    assert dates == {"SBNY": date(2023, 3, 10)}
+    assert requests[0].url.params["asof"] == "-"
+    assert requests[0].url.params["sort"] == "desc"
+    assert requests[0].url.params["limit"] == "1"

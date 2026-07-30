@@ -30,6 +30,8 @@ from market_loader.storage.local_staging import LocalStaging
 from market_loader.storage.s3 import ImmutableS3
 from market_loader.universe_builder import (
     fetch_assets,
+    fetch_assets_by_symbol,
+    missing_asset_symbols,
     read_candidates,
     resolve_candidates,
     write_universe,
@@ -143,6 +145,15 @@ def build_universe(
             api_secret=settings.ALPACA_API_SECRET,
             base_url=trading_base_url,
         )
+        missing_symbols = missing_asset_symbols(candidates, assets)
+        assets.extend(
+            fetch_assets_by_symbol(
+                symbols=missing_symbols,
+                api_key=settings.ALPACA_API_KEY,
+                api_secret=settings.ALPACA_API_SECRET,
+                base_url=trading_base_url,
+            )
+        )
         resolved, unresolved = resolve_candidates(candidates, assets)
         unresolved_path = output.with_suffix(output.suffix + ".unresolved.csv")
         if unresolved:
@@ -157,6 +168,7 @@ def build_universe(
             {
                 "ok": True,
                 "candidate_count": len(candidates),
+                "individual_lookup_count": len(missing_symbols),
                 "output_count": len(resolved),
                 "output": str(output.resolve()),
                 "start": start_date,

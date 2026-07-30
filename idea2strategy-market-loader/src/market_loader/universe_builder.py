@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -135,6 +136,59 @@ def fetch_assets(
     finally:
         if owned:
             http.close()
+
+
+def fetch_assets_by_symbol(
+    *,
+    symbols: list[str],
+    api_key: str,
+    api_secret: str,
+    base_url: str,
+    client: httpx.Client | None = None,
+) -> list[dict[str, Any]]:
+    if not api_key or not api_secret:
+        raise PermanentAlpacaError("Alpaca credentials are required")
+    owned = client is None
+    http = client or httpx.Client(base_url=base_url, timeout=30)
+    headers = {
+        "APCA-API-KEY-ID": api_key,
+        "APCA-API-SECRET-KEY": api_secret,
+    }
+    found: list[dict[str, Any]] = []
+    try:
+        for symbol in symbols:
+            response = http.get(f"/v2/assets/{quote(symbol, safe='')}", headers=headers)
+            if response.status_code == 404:
+                continue
+            if response.status_code in {401, 403}:
+                raise PermanentAlpacaError(
+                    f"Alpaca asset lookup authentication failed: HTTP {response.status_code}"
+                )
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict):
+                raise PermanentAlpacaError(f"invalid Alpaca asset response for {symbol}")
+            found.append(payload)
+        return found
+    except httpx.HTTPError as exc:
+        raise PermanentAlpacaError(
+            f"Alpaca individual asset lookup failed: {type(exc).__name__}"
+        ) from exc
+    finally:
+        if owned:
+            http.close()
+
+
+def missing_asset_symbols(
+    candidates: list[UniverseCandidate],
+    assets: list[dict[str, Any]],
+) -> list[str]:
+    known = {
+        canonical_alpaca_symbol(str(asset.get("symbol", "")))
+        for asset in assets
+        if asset.get("symbol")
+    }
+    return [item.provider_symbol for item in candidates if item.provider_symbol not in known]
 
 
 def resolve_candidates(

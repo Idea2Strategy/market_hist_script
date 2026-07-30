@@ -575,9 +575,12 @@ class MarketRepository:
             parameters = (manifest_id,)
         else:
             query += """
-                JOIN market_data.pipeline_partitions pp
-                  ON pp.result_manifest_id = dm.id
-                WHERE pp.pipeline_run_id = %s
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM market_data.pipeline_partitions pp
+                    WHERE pp.result_manifest_id = dm.id
+                      AND pp.pipeline_run_id = %s
+                )
             """
             parameters = (run_id,)
         query += " ORDER BY dm.id, so.object_key"

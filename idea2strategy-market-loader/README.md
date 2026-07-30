@@ -23,6 +23,18 @@ Copy `.env.example` to `.env` and set credentials locally. Copy
 access keys. AWS access uses the named CLI profile; private RDS access uses the SSM
 port-forwarding script and `sslmode=verify-full`.
 
+Build a loader universe from the repository's ten-year S&P 500 history and enabled
+ETF sources. The command resolves Alpaca symbols and primary exchanges through the
+read-only Assets API and refuses to write the final CSV if any symbol is unresolved.
+
+```powershell
+uv run market-loader build-universe `
+  --stocks ..\ticker_info\sp500_tickers_10years.txt `
+  --etfs ..\ticker_info\etf_universe.csv `
+  --output .\universe.csv `
+  --start 2016-07-30
+```
+
 Apply `db/migration/V001__market_data_initial_schema.sql` through the deployment
 Flyway process before executing any write command. The `market_loader` login role
 must already exist; V001 grants it only the runtime schema and table privileges it

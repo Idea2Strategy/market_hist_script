@@ -28,6 +28,13 @@ from market_loader.pipeline.planner import create_plan
 from market_loader.pipeline.publisher import Publisher
 from market_loader.storage.local_staging import LocalStaging
 from market_loader.storage.s3 import ImmutableS3
+from market_loader.universe_builder import (
+    fetch_assets,
+    read_candidates,
+    resolve_candidates,
+    write_universe,
+    write_unresolved,
+)
 
 app = typer.Typer(no_args_is_help=True, pretty_exceptions_show_locals=False)
 
@@ -113,6 +120,48 @@ def plan(
             raise typer.Exit(2)
     except typer.Exit:
         raise
+    except Exception as exc:
+        _fail(exc)
+
+
+@app.command("build-universe")
+def build_universe(
+    stocks: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    etfs: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    output: Annotated[Path, typer.Option(dir_okay=False)],
+    start: Annotated[str, typer.Option()],
+    trading_base_url: Annotated[str, typer.Option()] = "https://paper-api.alpaca.markets",
+    overwrite: Annotated[bool, typer.Option()] = False,
+) -> None:
+    """Build a loader universe from stock and ETF sources using Alpaca asset metadata."""
+    try:
+        start_date = _parse_date(start, "--start")
+        candidates = read_candidates(stocks, etfs, start_date)
+        settings = EnvironmentSettings()
+        assets = fetch_assets(
+            api_key=settings.ALPACA_API_KEY,
+            api_secret=settings.ALPACA_API_SECRET,
+            base_url=trading_base_url,
+        )
+        resolved, unresolved = resolve_candidates(candidates, assets)
+        unresolved_path = output.with_suffix(output.suffix + ".unresolved.csv")
+        if unresolved:
+            write_unresolved(unresolved_path, unresolved)
+            raise RuntimeError(
+                f"{len(unresolved)} symbols could not be resolved; "
+                f"universe was not written; inspect {unresolved_path}"
+            )
+        write_universe(output, resolved, overwrite=overwrite)
+        unresolved_path.unlink(missing_ok=True)
+        _echo_json(
+            {
+                "ok": True,
+                "candidate_count": len(candidates),
+                "output_count": len(resolved),
+                "output": str(output.resolve()),
+                "start": start_date,
+            }
+        )
     except Exception as exc:
         _fail(exc)
 

@@ -164,7 +164,7 @@ def build_universe(
         last_bar_dates = fetch_last_sip_bar_dates(
             symbols=probe_symbols,
             start=start_date,
-            end=date.today() + timedelta(days=1),
+            end=date.today() - timedelta(days=1),
             api_key=settings.ALPACA_API_KEY,
             api_secret=settings.ALPACA_API_SECRET,
             base_url=data_base_url,
